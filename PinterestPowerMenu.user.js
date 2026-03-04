@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
 // @namespace    https://github.com/Angel2mp3
-// @version      1.0.0
+// @version      1.0.1
 // @description  All-in-one Pinterest power tool: original quality, no registration walls, download fixer, board folder downloader, GIF hover/auto-play, remove videos, hide Visit Site, declutter, hide UI elements
 // @author       Angel2mp3
 // @match        https://www.pinterest.com/*
@@ -10,8 +10,11 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_setClipboard
 // @connect      *
 // @run-at       document-start
+// @updateURL    https://raw.githubusercontent.com/Angel2mp3/Pinterest-Power-Menu/main/PinterestPowerMenu.user.js
+// @downloadURL  https://raw.githubusercontent.com/Angel2mp3/Pinterest-Power-Menu/main/PinterestPowerMenu.user.js
 // ==/UserScript==
 
 (function () {
@@ -32,7 +35,6 @@
     hideUpdates:      false,
     hideMessages:     false,
     hideShare:        false,
-    hideUnavailable:  false,
     gifAutoPlay:      false,
     removeVideos:     false,
   };
@@ -482,6 +484,22 @@
     });
   }
 
+  // Pause all auto-playing GIFs when the tab/window is hidden to save resources,
+  // and resume them when the user comes back.
+  document.addEventListener('visibilitychange', () => {
+    if (!get('gifAutoPlay')) return;
+    if (document.hidden) {
+      document.querySelectorAll('[data-test-id="pinWrapper"]').forEach(stopGifInView);
+    } else if (_gifAutoIO) {
+      // Re-start GIFs that are still in the viewport
+      document.querySelectorAll('[data-test-id="pinWrapper"]').forEach(wrapper => {
+        if (!wrapper.__peAutoObs) return;
+        const r = wrapper.getBoundingClientRect();
+        if (r.top < window.innerHeight && r.bottom > 0) startGifInView(wrapper);
+      });
+    }
+  });
+
 
   // ═══════════════════════════════════════════════════════════════════
   //  MODULE: DECLUTTER  (no ads, no shopping, no blank spaces)
@@ -525,6 +543,8 @@
     if (text.startsWith('still window shopping'))  return true;
     // Quiz posts
     if (/\bquiz\b/i.test(pin.textContent)) return true;
+    // Deleted / unavailable pins
+    if (pin.querySelector('[data-test-id="unavailable-pin"]')) return true;
     return false;
   }
 
@@ -659,48 +679,6 @@
 
 
   // ═══════════════════════════════════════════════════════════════════
-  //  MODULE: HIDE UNAVAILABLE POSTS
-  // ═══════════════════════════════════════════════════════════════════
-  // Detects deleted/unavailable pins via [data-test-id="unavailable-pin"]
-  // and collapses them using the same technique as Declutter.
-
-  function isUnavailablePin(pin) {
-    return !!pin.querySelector('[data-test-id="unavailable-pin"]');
-  }
-
-  function filterUnavailablePins(container) {
-    if (!get('hideUnavailable')) return;
-    container.querySelectorAll('div[role="listitem"]').forEach(pin => {
-      if (!pin.__peUnavailRemoved && isUnavailablePin(pin)) {
-        pin.__peUnavailRemoved = true;
-        collapseEl(pin);
-      }
-    });
-  }
-
-  let _hideUnavailObs = null;
-
-  function initHideUnavailable() {
-    if (!get('hideUnavailable') || _hideUnavailObs) return;
-
-    function attachListObserver(listEl) {
-      if (listEl.__peUnavailObs) return;
-      listEl.__peUnavailObs = true;
-      filterUnavailablePins(listEl);
-      new MutationObserver(() => filterUnavailablePins(listEl))
-        .observe(listEl, { childList: true, subtree: true });
-    }
-
-    document.querySelectorAll('div[role="list"]').forEach(attachListObserver);
-
-    _hideUnavailObs = new MutationObserver(() => {
-      document.querySelectorAll('div[role="list"]').forEach(attachListObserver);
-    });
-    _hideUnavailObs.observe(document.documentElement, { childList: true, subtree: true });
-  }
-
-
-  // ═══════════════════════════════════════════════════════════════════
   //  MODULE: DOWNLOAD FIXER  (original Angel2mp3 logic, intact)
   // ═══════════════════════════════════════════════════════════════════
   function detectFileType(arr) {
@@ -710,14 +688,26 @@
     if (arr[0]===0x47 && arr[1]===0x49 && arr[2]===0x46 && arr[3]===0x38) return '.gif';
     if (arr[0]===0x52 && arr[1]===0x49 && arr[2]===0x46 && arr[3]===0x46 &&
         arr[8]===0x57 && arr[9]===0x45 && arr[10]===0x42 && arr[11]===0x50) return '.webp';
+    if (arr[4]===0x66 && arr[5]===0x74 && arr[6]===0x79 && arr[7]===0x70) return '.mp4';
     return '.jpg';
   }
 
   function sanitizeFilename(n) {
     if (!n) return null;
-    let s = n.replace(/[<>:"/\\|?*\x00-\x1f\x80-\x9f]/g, '').trim();
+    let s = String(n).replace(/[<>:"/\\|?*\x00-\x1f\x80-\x9f]/g, '').trim();
     if (s.length > 200) s = s.slice(0, 200);
     return s.length ? s : null;
+  }
+
+  // Remove any trailing known image/video extension from a base name so that
+  // the binary-detected extension is always the final (and only) one.
+  // e.g. "photo.jpg" → "photo"  |  "photo.jpg.png" → "photo.jpg"  |  "jpg" → "jpg"
+  // If stripping would leave an empty string we keep the original to avoid
+  // producing a bare extension file (e.g. ".jpg").
+  function stripKnownExt(name) {
+    if (!name) return name;
+    const stripped = name.replace(/\.(jpe?g|png|gif|webp|mp4|bmp|tiff?)$/i, '').trim();
+    return stripped.length ? stripped : name;
   }
 
   function randStr(len) {
@@ -737,8 +727,20 @@
       if (el?.textContent?.trim()) return sanitizeFilename(el.textContent.trim());
     }
     const meta = document.querySelector('meta[property="og:title"]');
-    if (meta?.content) return sanitizeFilename(meta.content.trim());
+    if (meta?.content) {
+      const t = meta.content.trim();
+      if (t !== 'Pinterest') return sanitizeFilename(t);
+    }
     return null;
+  }
+
+  // Strip any Pinterest auto-generated alt-text prefix from an alt string and
+  // return the real title, or null if there's nothing useful left.
+  const ALT_JUNK = /^(this\s+(image\s+)?(may\s+contain|contains?\s+(an\s+image\s+of|image\s+of|a\s+photo\s+of))|image\s+may\s+contain|photo\s+may\s+contain)[:\s]*/i;
+  function cleanAlt(raw) {
+    if (!raw) return null;
+    const s = raw.replace(ALT_JUNK, '').trim();
+    return s || null;
   }
 
   // Upgrade any pinimg thumbnail URL to /originals/ for max quality
@@ -781,24 +783,64 @@
     return new Promise((res, rej) => {
       GM_xmlhttpRequest({
         method: 'GET', url, responseType: 'arraybuffer',
-        onload:  r => (r.status >= 200 && r.status < 300) ? res(r.response) : rej(r.status),
-        onerror: rej,
+        // Referer is required — without it Pinterest's CDN returns 403
+        headers: {
+          'Referer': location.href,
+          'Accept':  'image/webp,image/apng,image/*,*/*;q=0.8',
+        },
+        onload:  r => (r.status >= 200 && r.status < 300)
+          ? res(r.response)
+          : rej(new Error('HTTP ' + r.status)),
+        onerror: e => rej(new Error('Network error: ' + (e && e.error || e))),
       });
     });
   }
 
+  // Build a descending-quality URL queue for a pinimg.com image.
+  // Tries originals first, then 736x, then 564x so we always get *something*
+  // even when the /originals/ path is access-restricted for a given pin.
+  function pinimgFallbackQueue(url) {
+    if (!url) return [url];
+    const m = url.match(
+      /^(https?:\/\/i\.pinimg\.com)\/(?:originals|\d+x)(\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{2}\/.+)$/i
+    );
+    if (!m) return [url];
+    const [, base, path] = m;
+    // Deduplicate while preserving order
+    return [
+      base + '/originals' + path,
+      base + '/736x'      + path,
+      base + '/564x'      + path,
+    ].filter((u, i, a) => a.indexOf(u) === i);
+  }
+
   async function downloadSingle(imageUrl, filename) {
     if (!imageUrl) return;
+
+    // Try originals → 736x → 564x until one succeeds
+    let buf = null;
+    for (const u of pinimgFallbackQueue(imageUrl)) {
+      try { buf = await fetchBinary(u); break; } catch (_) {}
+    }
+
+    if (!buf) {
+      console.error('[Pinterest Power Menu] Download failed: all URLs blocked for', imageUrl);
+      return;
+    }
+
     try {
-      const buf  = await fetchBinary(imageUrl);
-      const ext  = detectFileType(new Uint8Array(buf));
-      const name = (filename || extractPinTitle() || `pin-${randStr(15)}`) + ext;
-      const blob = new Blob([buf]);
-      const a    = document.createElement('a');
-      a.href     = URL.createObjectURL(blob);
-      a.download = name;
+      const ext      = detectFileType(new Uint8Array(buf));
+      // Strip any pre-existing extension so we never produce "photo.jpg.jpg"
+      // or a mismatched "photo.jpg.gif" — the binary-detected ext is always used.
+      const rawTitle = cleanAlt(filename) || filename || null;
+      const basePart = stripKnownExt(sanitizeFilename(rawTitle) || extractPinTitle() || `pin-${randStr(15)}`);
+      const name     = basePart + ext;
+      const blob     = new Blob([buf]);
+      const a        = document.createElement('a');
+      a.href         = URL.createObjectURL(blob);
+      a.download     = name;
       a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 100);
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
     } catch (e) {
       console.error('[Pinterest Power Menu] Download failed:', e);
     }
@@ -864,8 +906,7 @@
         seen.add(url);
         urls.push(url);
         // Use img alt text as the pin name (Pinterest puts the title/desc there)
-        const alt = (img.alt || '').trim();
-        names.set(url, alt ? sanitizeFilename(alt) : null);
+        names.set(url, sanitizeFilename(cleanAlt(img.alt)));
       }
     });
   }
@@ -938,7 +979,8 @@
     // Build per-file names: "BoardName - PinTitle" or "BoardName - xxxxxxxx"
     // Cap pinName at 80 chars so full path stays filesystem-safe.
     function makeFileName(url, ext) {
-      let pinName = names.get(url) || randStr(8);
+      // Strip any pre-existing extension so we never get "BoardName - photo.jpg.gif"
+      let pinName = stripKnownExt(names.get(url) || randStr(8));
       if (pinName.length > 80) pinName = pinName.slice(0, 80).trimEnd();
       return `${boardName} - ${pinName}${ext}`;
     }
@@ -1089,10 +1131,9 @@
 
   const HIDE_FEATURES = [
     { key: 'hideVisitSite',  label: 'Hide Visit Site',      desc: 'Remove all "Visit site" buttons',             reload: false },
-    { key: 'hideUpdates',    label: 'Hide Updates Bell',     desc: 'Hide the Updates / notifications button',     reload: false },
+    { key: 'hideUpdates',    label: 'Hide Updates Bell',    desc: 'Hide the Updates / notifications button',     reload: false },
     { key: 'hideMessages',   label: 'Hide Messages Button', desc: 'Hide the Messages chat button in the nav',    reload: false },
     { key: 'hideShare',      label: 'Hide Share Button',    desc: 'Hide the Share / Send button on pins',        reload: false },
-    { key: 'hideUnavailable', label: 'Hide Unavailable Posts', desc: 'Remove deleted/removed-by-creator pins',         reload: false },
   ];
 
   function createSettingsPanel() {
@@ -1142,7 +1183,7 @@
         </div>
       </div>
       <button id="pe-settings-btn" title="Pinterest Power Menu Settings">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor">
           <path d="M12 15.5A3.5 3.5 0 0 1 8.5 12 3.5 3.5 0 0 1 12 8.5a3.5 3.5 0 0 1 3.5 3.5 3.5 3.5 0 0 1-3.5 3.5m7.43-2.92c.04-.36.07-.72.07-1.08s-.03-.73-.07-1.08l2.32-1.82c.21-.16.27-.45.13-.69l-2.2-3.81a.51.51 0 0 0-.63-.22l-2.74 1.1c-.57-.44-1.18-.81-1.85-1.09l-.42-2.91A.51.51 0 0 0 13.5 1h-3c-.27 0-.5.19-.54.46l-.41 2.91c-.67.28-1.28.64-1.85 1.09L4.97 4.37a.51.51 0 0 0-.63.22L2.14 8.4c-.14.24-.08.53.13.69l2.32 1.82C4.55 11.27 4.5 11.63 4.5 12s.04.73.09 1.08l-2.32 1.82c-.21.16-.27.45-.13.69l2.2 3.81c.13.24.42.32.63.22l2.74-1.1c.57.44 1.18.8 1.85 1.09l.41 2.91c.04.27.27.46.54.46h3c.27 0 .5-.19.54-.46l.41-2.91c.67-.28 1.28-.65 1.85-1.09l2.74 1.1a.5.5 0 0 0 .63-.22l2.2-3.81c.14-.24.08-.53-.13-.69z"/>
         </svg>
       </button>
@@ -1183,7 +1224,6 @@
         if (key === 'gifAutoPlay') { if (cb.checked) initGifAutoPlay(); else stopGifAutoPlay(); }
         if (key === 'declutter') { if (cb.checked) initDeclutter(); }
         if (key === 'removeVideos') { if (cb.checked) initRemoveVideos(); }
-        if (key === 'hideUnavailable') { if (cb.checked) initHideUnavailable(); }
         if (key === 'hideUpdates' || key === 'hideMessages' || key === 'hideShare') applyNavToggles();
         if (cb.dataset.reload === 'true')
           wrap.querySelector('#pe-notice').style.display = 'flex';
@@ -1191,6 +1231,270 @@
     });
 
     wrap.querySelector('#pe-reload-btn').addEventListener('click', () => location.reload());
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  MODULE: IMAGE RIGHT-CLICK CONTEXT MENU
+  // ═══════════════════════════════════════════════════════════════════
+  // Intercepts right-clicks on (or near) any pinimg.com image and shows
+  // a custom menu with options to copy/save the original-quality version.
+  // Replaces the native browser menu only when a Pinterest image is
+  // under the cursor; other right-clicks fall through normally.
+
+  function initImageContextMenu() {
+    let _ctxMenu = null;
+    let _cleanupCtxMenu = null;
+
+    function removeCtxMenu() {
+      if (_cleanupCtxMenu) _cleanupCtxMenu();
+      if (_ctxMenu) { _ctxMenu.remove(); _ctxMenu = null; }
+    }
+
+    function getMediaInfo(target) {
+      let card = target.closest ? target.closest('[data-test-id="pin"], [data-grid-item="true"], [data-test-id="pin-closeup-image"], .PinCard') : null;
+      let wrap = target.closest ? target.closest('[data-test-id="pinWrapper"], [data-test-id="pin-closeup-image"]') : null;
+      let title = null;
+
+      if (card) {
+        // Try extracting title from the wrapper DOM
+        const titleEl = card.querySelector('[data-test-id="pinrep-footer-organic-title"] a, [data-test-id="pinrep-footer-organic-title"] h2, [data-test-id="pin-title"], [data-test-id="closeup-title"] h1');
+        if (titleEl && titleEl.textContent) title = titleEl.textContent.trim();
+      }
+
+      if (wrap) {
+        // Video
+        const vid = wrap.querySelector('video');
+        if (vid) {
+          const src = vid.src || (vid.querySelector('source') && vid.querySelector('source').src);
+          if (src && !/i\.pinimg\.com/.test(src)) return { url: src, type: 'video', title };
+        }
+      }
+
+      // Try finding nearest image
+      let img = target;
+      for (let i = 0; i < 15 && img && img !== document.body; i++) {
+        if (img.tagName === 'IMG' && img.src && /pinimg\.com/i.test(img.src)) {
+          break;
+        }
+        img = img.parentElement;
+      }
+      
+      if (!img || img.tagName !== 'IMG' || !/pinimg\.com/i.test(img.src)) {
+        if (wrap) {
+           img = wrap.querySelector('img[src*="pinimg.com"]');
+        } else if (card) {
+           img = card.querySelector('img[src*="pinimg.com"]');
+        } else {
+           img = null;
+        }
+      }
+
+      if (!img) return null;
+
+      if (!title) {
+        title = cleanAlt(img.getAttribute('alt'));
+      }
+      
+      if (!title && card) {
+         // Fallback to aria-label on the main pin link
+         const link = card.querySelector('a[href*="/pin/"]');
+         if (link) {
+           let aria = link.getAttribute('aria-label') || '';
+           aria = aria.replace(/pin page$/i, '').trim();
+           if (aria) title = aria;
+         }
+      }
+
+      // Now determine if it's a GIF or Image
+      // 1. Is it actively playing a GIF? (hover/auto-play swaps src)
+      if (/\.gif(\?|$)/i.test(img.src)) {
+        return { url: img.src, type: 'gif', title };
+      }
+      
+      // 2. Does it have a GIF in its original srcset?
+      const origSrcset = img.__peAutoOrigSrcset || img.getAttribute('srcset') || '';
+      for (const part of origSrcset.split(',')) {
+        const url = part.trim().split(/\s+/)[0];
+        if (url && /\.gif(\?|$)/i.test(url)) return { url: url, type: 'gif', title };
+      }
+
+      // Otherwise, it's a standard image. Return original quality URL.
+      return { url: getBestUrl(img), type: 'image', title };
+    }
+
+    // Return the best original-quality URL for an img element.
+    function getBestUrl(img) {
+      const base = img.__peAutoOrigSrc || img.src;
+      const m = base.match(OQ_RE);
+      return m ? m[1] + '/originals' + m[2] : base;
+    }
+
+    async function copyMediaToClipboard(origUrl, type) {
+      function fallbackToText() {
+        if (typeof GM_setClipboard === 'function') {
+          GM_setClipboard(origUrl, 'text');
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = origUrl;
+          ta.style.cssText = 'position:fixed;left:-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          ta.remove();
+        }
+      }
+
+      if (type === 'video' || type === 'gif') {
+        // We cannot reliably put video or animated gif binaries into the OS clipboard 
+        // without causing bugs like Discord pasting "message.txt".
+        // Instead, copy the direct URL so it auto-embeds natively.
+        fallbackToText();
+        return;
+      }
+
+      const buf  = await fetchBinary(origUrl);
+      const arr  = new Uint8Array(buf);
+      const ext  = detectFileType(arr);
+      const mime = ext === '.png' ? 'image/png'
+                 : ext === '.gif' ? 'image/gif'
+                 : ext === '.webp' ? 'image/webp'
+                 : 'image/jpeg';
+
+      if (mime === 'image/gif' || mime === 'image/webp') {
+        fallbackToText();
+        return;
+      }
+
+      let blob = new Blob([buf], { type: mime });
+
+      if (mime !== 'image/png') {
+        blob = await new Promise(res => {
+          const bUrl = URL.createObjectURL(blob);
+          const tmp  = new Image();
+          tmp.crossOrigin = 'anonymous';
+          tmp.onload = () => {
+            const cv = document.createElement('canvas');
+            cv.width  = tmp.naturalWidth;
+            cv.height = tmp.naturalHeight;
+            cv.getContext('2d').drawImage(tmp, 0, 0);
+            cv.toBlob(b => { URL.revokeObjectURL(bUrl); res(b); }, 'image/png');
+          };
+          tmp.onerror = () => { URL.revokeObjectURL(bUrl); res(null); };
+          tmp.src = bUrl;
+        });
+      }
+
+      if (blob) {
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        } catch (_) {
+          fallbackToText();
+        }
+      } else {
+        fallbackToText();
+      }
+    }
+
+    document.addEventListener('contextmenu', e => {
+      const media = getMediaInfo(e.target);
+      if (!media) { removeCtxMenu(); return; }
+
+      e.preventDefault();
+      removeCtxMenu(); // Cleans up the old menu and its event listeners
+
+      const { url: origUrl, type, title } = media;
+      const x = Math.min(e.clientX, window.innerWidth  - 236);
+      const y = Math.min(e.clientY, window.innerHeight - 180);
+
+      const menu = document.createElement('div');
+      menu.id = 'pe-ctx-menu';
+      menu.style.cssText = `left:${x}px;top:${y}px`;
+
+      function addItem(svgD, label, action) {
+        const item = document.createElement('button');
+        item.className = 'pe-ctx-item';
+        item.innerHTML =
+          `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">${svgD}</svg>` +
+          `<span>${label}</span>`;
+        item.addEventListener('click', e => { e.stopPropagation(); action(); removeCtxMenu(); });
+        menu.appendChild(item);
+      }
+
+      // ── Copy media ──────────────────────────────────────────────────
+      addItem(
+        '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+        'Copy Original Media',
+        async () => {
+          try {
+            await copyMediaToClipboard(origUrl, type);
+          } catch (err) {
+            console.warn('[Pinterest Power Menu] Copy media failed:', err);
+          }
+        }
+      );
+
+      // ── Copy URL ────────────────────────────────────────────────────
+      addItem(
+        '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+        'Copy Media URL',
+        () => {
+          if (typeof GM_setClipboard === 'function') {
+            GM_setClipboard(origUrl, 'text');
+          } else {
+            navigator.clipboard.writeText(origUrl).catch(() => {
+              const ta = document.createElement('textarea');
+              ta.value = origUrl;
+              ta.style.cssText = 'position:fixed;left:-9999px';
+              document.body.appendChild(ta);
+              ta.select();
+              document.execCommand('copy');
+              ta.remove();
+            });
+          }
+        }
+      );
+
+      // ── Open in new tab ─────────────────────────────────────────────
+      addItem(
+        '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
+        'Open Media in New Tab',
+        () => window.open(origUrl, '_blank', 'noopener')
+      );
+
+      // ── Save / download ─────────────────────────────────────────────
+      addItem(
+        '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+        'Save Original Media',
+        () => downloadSingle(origUrl, title)
+      );
+
+      _ctxMenu = menu;
+      document.body.appendChild(menu);
+
+      const onClose = ev => {
+        if (menu.contains(ev.target)) return;
+        removeCtxMenu();
+      };
+      
+      const onEsc = ev => {
+        if (ev.key === 'Escape') removeCtxMenu();
+      };
+
+      _cleanupCtxMenu = () => {
+        document.removeEventListener('click',       onClose);
+        document.removeEventListener('contextmenu', onClose);
+        document.removeEventListener('keydown',     onEsc);
+        _cleanupCtxMenu = null;
+      };
+
+      setTimeout(() => {
+        if (!_cleanupCtxMenu) return; // Menu might have been closed synchronously
+        document.addEventListener('click',       onClose);
+        document.addEventListener('contextmenu', onClose);
+        document.addEventListener('keydown',     onEsc);
+      }, 0);
+    }, true);
   }
 
 
@@ -1261,8 +1565,8 @@
       /* ──────── Settings circle FAB ──────── */
       #pe-settings-wrap {
         position: fixed;
-        bottom: 20px;
-        right: 20px;
+        bottom: 6px;
+        right: 6px;
         z-index: 2147483647;
         display: flex;
         flex-direction: column;
@@ -1272,7 +1576,7 @@
         user-select: none;
       }
       #pe-settings-btn {
-        width: 52px; height: 52px;
+        width: 40px; height: 40px;
         border-radius: 50%;
         background: #e60023; color: #fff; border: none;
         cursor: pointer;
@@ -1387,8 +1691,8 @@
       /* ──────── Board Downloader FAB ──────── */
       #pe-bd-fab {
         position: fixed;
-        bottom: 86px;
-        right: 20px;
+        bottom: 54px;
+        right: 6px;
         z-index: 2147483646;
         display: flex;
         flex-direction: column;
@@ -1444,6 +1748,33 @@
       .pe-bd-opt:hover { background: #f5f5f5; }
       .pe-bd-opt:disabled { color: #aaa; cursor: not-allowed; background: none; }
       .pe-bd-opt + .pe-bd-opt { border-top: 1px solid #f0f0f0; }
+
+      /* ──────── Image right-click context menu ──────── */
+      #pe-ctx-menu {
+        position: fixed;
+        background: #fff;
+        border-radius: 10px;
+        box-shadow: 0 4px 28px rgba(0,0,0,.18), 0 1px 6px rgba(0,0,0,.1);
+        border: 1px solid rgba(0,0,0,.09);
+        z-index: 2147483647;
+        min-width: 220px;
+        overflow: hidden;
+        padding: 4px 0;
+        animation: pe-bd-pop .12s ease-out;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        user-select: none;
+      }
+      .pe-ctx-item {
+        display: flex; align-items: center; gap: 10px;
+        padding: 8px 14px;
+        font-size: 13px; font-weight: 500; color: #111;
+        background: none; border: none; width: 100%;
+        cursor: pointer; text-align: left;
+        transition: background .1s;
+      }
+      .pe-ctx-item:hover { background: #f5f5f5; }
+      .pe-ctx-item + .pe-ctx-item { border-top: 1px solid #f0f0f0; }
+      .pe-ctx-item svg { flex-shrink: 0; color: #555; }
     `;
     (document.head || document.documentElement).appendChild(s);
   }
@@ -1479,11 +1810,11 @@
     // Remove videos
     initRemoveVideos();
 
-    // Hide unavailable posts
-    initHideUnavailable();
-
     // GIF auto-play
     if (get('gifAutoPlay')) initGifAutoPlay();
+
+    // Image right-click context menu
+    initImageContextMenu();
 
     // Download fixer event listener
     initDownloadFixer();

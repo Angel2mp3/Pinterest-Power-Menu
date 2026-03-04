@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
 // @namespace    https://github.com/Angel2mp3
-// @version      1.0.1
+// @version      1.0.2
 // @description  All-in-one Pinterest power tool: original quality, no registration walls, download fixer, board folder downloader, GIF hover/auto-play, remove videos, hide Visit Site, declutter, hide UI elements
 // @author       Angel2mp3
+// @icon         https://www.pinterest.com/favicon.ico
 // @match        https://www.pinterest.com/*
 // @match        https://pinterest.com/*
 // @match        https://*.pinterest.com/*

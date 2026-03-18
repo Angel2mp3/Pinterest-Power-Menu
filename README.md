@@ -9,7 +9,6 @@
 [![Version](https://img.shields.io/badge/version-1.0.0-red?style=flat-square)](https://github.com/Angel2mp3)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-brightgreen?style=flat-square&logo=tampermonkey)](https://www.tampermonkey.net/)
-[![Pinterest](https://img.shields.io/badge/Pinterest-compatible-E60023?style=flat-square&logo=pinterest&logoColor=white)](https://www.pinterest.com)
 
 <br/>
 
@@ -17,7 +16,9 @@
 
 > Requires a userscript manager like [Violentmonkey](https://violentmonkey.github.io/get-it/) or [Tampermonkey](https://www.tampermonkey.net/) (Chrome / Edge / Firefox / Safari)
 
-[![Install Pinterest Power Menu](https://img.shields.io/badge/%E2%AC%87%EF%B8%8F%20Install%20Script-Pinterest%20Power%20Menu-E60023?style=for-the-badge&logoColor=white)](https://github.com/Angel2mp3/Pinterest-Power-Menu/raw/refs/heads/main/PinterestPowerMenu.user.js)
+> While this script can do a lot on its own, it does not block most ads, so i **highly recomend** you install [Ublock Origin](https://github.com/gorhill/uBlock) as it works very well alongside it!
+
+[![Install Pinterest Power Menu](https://img.shields.io/badge/%E2%AC%87%EF%B8%8F%20Install%20Script-Pinterest%20Power%20Menu-E60023?style=for-the-badge&logoColor=white)](https://github.com/Angel2mp3/pinterest-power-menu/raw/main/PinterestEnhanced.user.js)
 
 *Click the button above → the extension will open and ask you to confirm the install.*
 
@@ -59,10 +60,11 @@ Removes noise from your feed without leaving blank gaps in the grid:
 - Shop-by banners and product cards
 - Quiz posts
 - "Explore featured boards" promos
-- "Still window shopping?" prompts
+- "Still shopping?" prompts
 - Ad-blocker modals
 - Download upsell popovers
 - Explore tab notification badges
+- Unavailable / Removed pins
 
 ### 🙈 Hide UI Elements *(collapsible group)*
 Individual toggles for UI elements you might not want:
@@ -73,7 +75,24 @@ Individual toggles for UI elements you might not want:
 | **Hide Updates Bell** | The notifications/updates bell in the nav |
 | **Hide Messages Button** | The Messages / chat button in the nav |
 | **Hide Share Button** | The Share / Send button on pin closeups |
-| **Hide Unavailable Posts** | Deleted or removed-by-creator pins |
+
+---
+
+## 📱 Mobile Support
+
+The script runs on Pinterest's mobile web inside mobile browsers that support userscript managers (e.g. **Firefox for Android + Violentmonkey**, **Safari on iOS + Userscripts app**, **Kiwi Browser + Tampermonkey**).
+
+| Feature | Mobile |
+|---|---|
+| Original Quality Images | ✅ Works |
+| No Registration Wall | ✅ Works |
+| Download Fixer | ✅ Works |
+| Board Downloader | ✅ Works (falls back to individual downloads if folder picker is unavailable) |
+| **GIF Hover Play** | ❌ Desktop only — hover requires a mouse. Toggle it off and use Auto-Play instead. |
+| **Auto-Play Visible GIFs** |❓ May or may not work |
+| Remove Videos | ✅ Works |
+| Declutter | ✅ Works |
+| Hide UI Elements | ➖ Not all work |
 
 ---
 
@@ -94,24 +113,6 @@ Individual toggles for UI elements you might not want:
 
 Click the **⚙️ gear button** in the bottom-right of any Pinterest page to open the settings panel. Every feature can be toggled individually and is saved automatically. No page reload needed for most options.
 
-<details>
-<summary><b>Default state of each toggle</b></summary>
-
-| Feature | Default |
-|---|---|
-| Original Quality | ✅ On |
-| No Registration Wall | ✅ On |
-| Download Fixer | ✅ On |
-| GIF Hover Play | ✅ On |
-| Board Downloader | ✅ On |
-| Declutter | ✅ On |
-| Hide Visit Site | ✅ On |
-| Auto-Play Visible GIFs | ❌ Off |
-| Remove Videos | ❌ Off |
-| Hide Updates Bell | ❌ Off |
-| Hide Messages Button | ❌ Off |
-| Hide Share Button | ❌ Off |
-| Hide Unavailable Posts | ❌ Off |
 
 </details>
 

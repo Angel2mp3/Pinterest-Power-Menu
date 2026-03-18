@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
 // @namespace    https://github.com/Angel2mp3
-// @version      1.0.2
+// @version      1.0.0
 // @description  All-in-one Pinterest power tool: original quality, no registration walls, download fixer, board folder downloader, GIF hover/auto-play, remove videos, hide Visit Site, declutter, hide UI elements
 // @author       Angel2mp3
 // @icon         https://www.pinterest.com/favicon.ico
@@ -68,6 +68,17 @@
 
   loadCfg();
 
+  // ── Mobile / touch detection ─────────────────────────────────────────
+  // Gates features that are mouse-only or cause jank on touch devices.
+  const IS_MOBILE = /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent)
+    || (navigator.maxTouchPoints > 1 && /macintel/i.test(navigator.platform));
+
+  // Utility: returns a debounced version of fn (resets timer on every call).
+  function debounce(fn, ms) {
+    let t;
+    return function () { clearTimeout(t); t = setTimeout(fn, ms); };
+  }
+
 
   // ═══════════════════════════════════════════════════════════════════
   //  MODULE: ORIGINAL QUALITY  (fast – no probe, no popup)
@@ -103,10 +114,16 @@
   // images before they fire their first load event.
   const oqObs = new MutationObserver(records => {
     if (!get('originalQuality')) return;
-    records.forEach(r => {
+    const process = () => records.forEach(r => {
       if (r.attributeName === 'src') upgradeImg(r.target);
       else r.addedNodes.forEach(scanOQ);
     });
+    // On mobile, yield to the browser's render pipeline so scroll stays smooth
+    if (IS_MOBILE && typeof requestIdleCallback === 'function') {
+      requestIdleCallback(process, { timeout: 300 });
+    } else {
+      process();
+    }
   });
   oqObs.observe(document.documentElement, {
     childList: true, subtree: true,
@@ -316,19 +333,85 @@
   //  • <video> elements (pin closeup / detail page) are still kept paused
   //    via the MutationObserver so they don't auto-play in the background.
 
+  // Selector matching any img that carries a GIF URL in srcset, live src, or lazy data-src.
+  // Used by both hover-play and auto-play modules.
+  const GIF_IMG_SEL = 'img[srcset*=".gif"], img[src*=".gif"], img[data-src*=".gif"]';
+  const GIF_PIN_CONTAINER_SEL = [
+    '[data-test-id="pinWrapper"]',
+    '[data-grid-item="true"]',
+    '[data-test-id="pin"]',
+    'div[role="listitem"]',
+    '[data-test-id="pin-closeup-image"]',
+  ].join(', ');
+
   let _gifActiveImg     = null;   // <img> currently showing a .gif
   let _gifOrigSrc       = null;   // original src to restore on leave
   let _gifOrigSrcset    = null;   // original srcset to restore on leave
   let _gifActiveCont    = null;   // pinWrapper of the active gif
+  let _gifActiveVid     = null;   // <video> currently playing a GIF (mobile hover/tap)
 
-  // Extract the .gif URL from an img's srcset attribute
+  // Pinterest uses different card wrappers across home/search/closeup pages,
+  // especially on mobile. Resolve the nearest usable pin container defensively.
+  function findGifContainer(node) {
+    if (!node || node.nodeType !== 1) return null;
+    return node.closest(GIF_PIN_CONTAINER_SEL);
+  }
+
+  // Resolve a video source even when Pinterest lazy-loads into data-* attrs.
+  function getVideoSrc(video) {
+    if (!video) return '';
+    const source = video.querySelector && video.querySelector('source');
+    return video.src
+      || video.getAttribute('src')
+      || video.getAttribute('data-src')
+      || (source && (source.src || source.getAttribute('src') || source.getAttribute('data-src')))
+      || '';
+  }
+
+  // Ensure lazy mobile GIF videos have a concrete src before play() attempts.
+  function hydrateVideoSource(video) {
+    if (!video) return;
+    if (!video.getAttribute('src')) {
+      const ds = video.getAttribute('data-src');
+      if (ds) video.setAttribute('src', ds);
+    }
+    const source = video.querySelector && video.querySelector('source');
+    if (source && !source.getAttribute('src')) {
+      const ds = source.getAttribute('data-src');
+      if (ds) source.setAttribute('src', ds);
+    }
+  }
+
+  // Classify whether a <video> is a GIF-like pin media.
+  // Some mobile layouts use i.pinimg.com sources, others expose only
+  // a PinTypeIdentifier badge with text "GIF".
+  function isGifVideo(video, container) {
+    if (!video) return false;
+    const src = getVideoSrc(video);
+    if (/i\.pinimg\.com/i.test(src)) return true;
+    const wrap = container || findGifContainer(video);
+    const badge = wrap && wrap.querySelector('[data-test-id="PinTypeIdentifier"]');
+    if (!badge) return false;
+    const t = (badge.textContent || '').trim().toLowerCase();
+    if (t === 'gif' || t.includes('animated')) return true;
+    if (t === 'video' || t.includes('watch')) return false;
+    return false;
+  }
+
+  // Extract the .gif URL from an img element, checking srcset, live src, and data-src.
   function getGifSrcFromImg(img) {
     if (!img) return null;
-    const srcset = img.getAttribute('srcset') || '';
+    // Prefer srcset (Pinterest hides the GIF at "4x"; also stored in __peAutoOrigSrcset)
+    const srcset = img.getAttribute('srcset') || img.__peAutoOrigSrcset || '';
     for (const part of srcset.split(',')) {
       const url = part.trim().split(/\s+/)[0];
       if (url && /\.gif(\?|$)/i.test(url)) return url;
     }
+    // GIF already in src (srcset was cleared and .gif URL was applied)
+    if (/\.gif(\?|$)/i.test(img.src)) return img.src;
+    // Lazy-loaded src attribute
+    const ds = img.getAttribute('data-src') || '';
+    if (/\.gif(\?|$)/i.test(ds)) return ds;
     return null;
   }
 
@@ -338,6 +421,10 @@
       // before we restore src
       if (_gifOrigSrcset !== null) _gifActiveImg.setAttribute('srcset', _gifOrigSrcset);
       if (_gifOrigSrc    !== null) _gifActiveImg.src = _gifOrigSrc;
+    }
+    if (_gifActiveVid) {
+      try { _gifActiveVid.pause(); } catch (_) {}
+      _gifActiveVid = null;
     }
     const prevCont    = _gifActiveCont;
     _gifActiveImg     = null;
@@ -356,7 +443,40 @@
   // Keep any <video> elements (pin detail/closeup page) paused so they
   // don't auto-play in the background.
   function pauseVidOnAdd(v) {
-    if (v.__pePaused) return;
+    if (v.__pePaused || v.__peGifVid) return;
+    // GIFs rendered as <video src="i.pinimg.com/…"> on mobile must NOT be paused here —
+    // the GIF hover / auto-play modules manage those independently.
+    const getSrc = () => getVideoSrc(v);
+    const src = getSrc();
+    const initialWrap = findGifContainer(v);
+    if (isGifVideo(v, initialWrap)) {
+      v.__peGifVid = true;
+      return;
+    }
+    // src not yet assigned (lazy-load): observe for when it is set before deciding to pause.
+    // Without this, Pinterest's async src assignment races with auto-play on mobile —
+    // the deferred kill() calls would pause the video after auto-play had already started it.
+    if (!src) {
+      if (v.__peVidSrcObs) return; // observer already attached
+      v.__peVidSrcObs = true;
+      const obs = new MutationObserver(() => {
+        const s = getSrc();
+        if (!s) return; // still not set – keep waiting
+        obs.disconnect();
+        v.__peVidSrcObs = false;
+        const wrap = findGifContainer(v);
+        if (isGifVideo(v, wrap)) {
+          // It's a mobile GIF video – let hover / auto-play manage it; never pause it
+          v.__peGifVid = true;
+          const pw = wrap;
+          if (pw && _gifAutoIO) { pw.__peAutoObs = false; observeGifPins(); }
+        } else {
+          pauseVidOnAdd(v); // real video – go ahead and pause it
+        }
+      });
+      obs.observe(v, { attributes: true, attributeFilter: ['src'], childList: true });
+      return;
+    }
     v.__pePaused = true;
     v.muted = true;
     const kill = () => { try { v.pause(); } catch (_) {} };
@@ -375,18 +495,11 @@
     document.addEventListener('mouseover', e => {
       if (!get('gifHover')) return;
 
-      // Walk up to [data-test-id="pinWrapper"] (max 20 levels)
-      let cur = e.target, pinWrapper = null;
-      for (let i = 0; i < 20 && cur && cur !== document.body; i++) {
-        if (cur.getAttribute && cur.getAttribute('data-test-id') === 'pinWrapper') {
-          pinWrapper = cur; break;
-        }
-        cur = cur.parentElement;
-      }
+      const pinWrapper = findGifContainer(e.target);
       if (!pinWrapper || pinWrapper === _gifActiveCont) return;
 
       // Look for a GIF image inside this pin card
-      const img = pinWrapper.querySelector('img[srcset*=".gif"]');
+      const img = pinWrapper.querySelector(GIF_IMG_SEL);
       if (!img) return;
       const gifUrl = getGifSrcFromImg(img);
       if (!gifUrl) return;
@@ -412,6 +525,61 @@
       if (to && _gifActiveCont.contains(to)) return;
       pauseActiveGif();
     }, { passive: true });
+
+    // ── Touch: tap to preview GIF on mobile ──────────────────────────
+    // First tap on a GIF pin starts playback; second tap (or tap elsewhere) stops it.
+    // Scrolling never accidentally triggers GIF playback.
+    let _gifTouchStartY = 0, _gifTouchScrolled = false;
+
+    document.addEventListener('touchstart', e => {
+      _gifTouchStartY   = e.touches[0].clientY;
+      _gifTouchScrolled = false;
+    }, { passive: true });
+
+    document.addEventListener('touchmove', e => {
+      if (Math.abs(e.touches[0].clientY - _gifTouchStartY) > 8) _gifTouchScrolled = true;
+    }, { passive: true });
+
+    document.addEventListener('touchend', e => {
+      if (!get('gifHover') || _gifTouchScrolled) return;
+      // Don't interfere when the context menu is open
+      if (document.getElementById('pe-ctx-menu')) return;
+      const touch = e.changedTouches[0];
+      const el = document.elementFromPoint(touch.clientX, touch.clientY);
+      if (!el) return;
+      const pinWrapper = findGifContainer(el);
+      if (!pinWrapper) { pauseActiveGif(); return; }
+      const img    = pinWrapper.querySelector(GIF_IMG_SEL);
+      const gifUrl = img ? getGifSrcFromImg(img) : null;
+      if (!gifUrl) {
+        // No img-based GIF – check for a mobile video-based GIF
+        const vid   = pinWrapper.querySelector('video');
+        if (vid) hydrateVideoSource(vid);
+        if (!vid || !isGifVideo(vid, pinWrapper)) { pauseActiveGif(); return; }
+        // Second tap on the same video GIF = stop
+        if (pinWrapper === _gifActiveCont) { pauseActiveGif(); return; }
+        pauseActiveGif();
+        _gifActiveCont = pinWrapper;
+        _gifActiveVid  = vid;
+        vid.muted = true;
+        vid.loop  = true;
+        vid.playsInline = true;
+        if (vid.readyState === 0) {
+          try { vid.load(); } catch (_) {}
+        }
+        try { vid.play(); } catch (_) {}
+        return;
+      }
+      // Second tap on the same GIF pin = stop
+      if (pinWrapper === _gifActiveCont) { pauseActiveGif(); return; }
+      pauseActiveGif();
+      _gifActiveImg     = img;
+      _gifOrigSrc       = img.src;
+      _gifOrigSrcset    = img.getAttribute('srcset');
+      _gifActiveCont    = pinWrapper;
+      img.removeAttribute('srcset');
+      img.src = gifUrl;
+    }, { passive: true });
   }
 
 
@@ -425,37 +593,67 @@
   let _gifAutoMO = null;   // MutationObserver for new pins
 
   function startGifInView(wrapper) {
-    const img = wrapper.querySelector('img[srcset*=".gif"]');
-    if (!img || img.__peAutoPlaying) return;
-    const gifUrl = getGifSrcFromImg(img);
-    if (!gifUrl) return;
-    img.__peAutoOrigSrc    = img.src;
-    img.__peAutoOrigSrcset = img.getAttribute('srcset');
-    img.removeAttribute('srcset');
-    img.src = gifUrl;
-    img.__peAutoPlaying = true;
+    // ── img-based GIF (desktop + most mobile) ──────────────────────
+    const img = wrapper.querySelector(GIF_IMG_SEL);
+    if (img && !img.__peAutoPlaying) {
+      const gifUrl = getGifSrcFromImg(img);
+      if (gifUrl) {
+        img.__peAutoOrigSrc    = img.src;
+        img.__peAutoOrigSrcset = img.getAttribute('srcset');
+        img.removeAttribute('srcset');
+        img.src = gifUrl;
+        img.__peAutoPlaying = true;
+        return;
+      }
+    }
+    // ── video-based GIF (mobile) ──
+    const vid = wrapper.querySelector('video');
+    if (vid && !vid.__peAutoPlaying) {
+      hydrateVideoSource(vid);
+      if (isGifVideo(vid, wrapper)) {
+        vid.__peAutoPlaying = true;
+        vid.muted = true;
+        vid.loop  = true;
+        vid.playsInline = true;
+        if (vid.readyState === 0) {
+          try { vid.load(); } catch (_) {}
+        }
+        try { vid.play(); } catch (_) {}
+      }
+    }
   }
 
   function stopGifInView(wrapper) {
-    const imgs = wrapper.querySelectorAll('img');
-    imgs.forEach(img => {
+    wrapper.querySelectorAll('img').forEach(img => {
       if (!img.__peAutoPlaying) return;
       // Don't interfere if hover is currently managing this img
-      if (img === _gifActiveImg) {
-        img.__peAutoPlaying = false;
-        return;
-      }
+      if (img === _gifActiveImg) { img.__peAutoPlaying = false; return; }
       if (img.__peAutoOrigSrcset) img.setAttribute('srcset', img.__peAutoOrigSrcset);
       if (img.__peAutoOrigSrc)    img.src = img.__peAutoOrigSrc;
       img.__peAutoPlaying = false;
+    });
+    // Stop video-based GIFs (mobile)
+    wrapper.querySelectorAll('video').forEach(vid => {
+      if (!vid.__peAutoPlaying) return;
+      vid.__peAutoPlaying = false;
+      if (vid === _gifActiveVid) return; // hover/tap is managing this video
+      try { vid.pause(); } catch (_) {}
     });
   }
 
   function observeGifPins() {
     if (!_gifAutoIO) return;
-    document.querySelectorAll('[data-test-id="pinWrapper"]').forEach(wrapper => {
+    document.querySelectorAll(GIF_PIN_CONTAINER_SEL).forEach(wrapper => {
       if (wrapper.__peAutoObs) return;
-      if (!wrapper.querySelector('img[srcset*=".gif"]')) return;
+      // Detect img-based GIF or video-based GIF (mobile)
+      const hasGifImg = !!wrapper.querySelector(GIF_IMG_SEL);
+      const hasGifVid = (() => {
+        const vid = wrapper.querySelector('video');
+        if (!vid) return false;
+        if (vid.__peGifVid) return true; // already confirmed as a GIF video
+        return isGifVideo(vid, wrapper);
+      })();
+      if (!hasGifImg && !hasGifVid) return;
       wrapper.__peAutoObs = true;
       _gifAutoIO.observe(wrapper);
     });
@@ -479,7 +677,7 @@
   function stopGifAutoPlay() {
     if (_gifAutoIO) { _gifAutoIO.disconnect(); _gifAutoIO = null; }
     if (_gifAutoMO) { _gifAutoMO.disconnect(); _gifAutoMO = null; }
-    document.querySelectorAll('[data-test-id="pinWrapper"]').forEach(wrapper => {
+    document.querySelectorAll(GIF_PIN_CONTAINER_SEL).forEach(wrapper => {
       stopGifInView(wrapper);
       wrapper.__peAutoObs = false;
     });
@@ -490,10 +688,10 @@
   document.addEventListener('visibilitychange', () => {
     if (!get('gifAutoPlay')) return;
     if (document.hidden) {
-      document.querySelectorAll('[data-test-id="pinWrapper"]').forEach(stopGifInView);
+      document.querySelectorAll(GIF_PIN_CONTAINER_SEL).forEach(stopGifInView);
     } else if (_gifAutoIO) {
       // Re-start GIFs that are still in the viewport
-      document.querySelectorAll('[data-test-id="pinWrapper"]').forEach(wrapper => {
+      document.querySelectorAll(GIF_PIN_CONTAINER_SEL).forEach(wrapper => {
         if (!wrapper.__peAutoObs) return;
         const r = wrapper.getBoundingClientRect();
         if (r.top < window.innerHeight && r.bottom > 0) startGifInView(wrapper);
@@ -596,7 +794,8 @@
       if (listEl.__peDeclutterObs) return;
       listEl.__peDeclutterObs = true;
       filterPins(listEl);
-      new MutationObserver(() => filterPins(listEl))
+      const onMutate = IS_MOBILE ? debounce(() => filterPins(listEl), 200) : () => filterPins(listEl);
+      new MutationObserver(onMutate)
         .observe(listEl, { childList: true, subtree: true });
     }
 
@@ -664,7 +863,8 @@
       if (listEl.__peVideoObs) return;
       listEl.__peVideoObs = true;
       filterVideoPins(listEl);
-      new MutationObserver(() => filterVideoPins(listEl))
+      const onMutate = IS_MOBILE ? debounce(() => filterVideoPins(listEl), 200) : () => filterVideoPins(listEl);
+      new MutationObserver(onMutate)
         .observe(listEl, { childList: true, subtree: true });
     }
 
@@ -1244,6 +1444,11 @@
   // under the cursor; other right-clicks fall through normally.
 
   function initImageContextMenu() {
+    // The custom context menu is mouse-only. On mobile the long-press handler
+    // would compete with native browser actions (text selection, system menus),
+    // so we skip the entire module on touch devices.
+    if (IS_MOBILE) return;
+
     let _ctxMenu = null;
     let _cleanupCtxMenu = null;
 
@@ -1397,20 +1602,24 @@
       }
     }
 
-    document.addEventListener('contextmenu', e => {
-      const media = getMediaInfo(e.target);
-      if (!media) { removeCtxMenu(); return; }
+    // Long-press state for mobile context menu
+    let _lpJustShown = false;
+    let _lpTimer     = null;
+    let _lpScrolled  = false;
+    let _lpStartX = 0, _lpStartY = 0;
 
-      e.preventDefault();
-      removeCtxMenu(); // Cleans up the old menu and its event listeners
-
+    // Extracted so both right-click and long-press can reuse the same menu logic.
+    // isTouch = true adds a longer grace period before outside-click dismissal,
+    // preventing the finger-lift tap from instantly closing the menu.
+    function showCtxMenuAt(x, y, media, isTouch) {
+      removeCtxMenu();
       const { url: origUrl, type, title } = media;
-      const x = Math.min(e.clientX, window.innerWidth  - 236);
-      const y = Math.min(e.clientY, window.innerHeight - 180);
+      const menuX = Math.min(x, window.innerWidth  - 236);
+      const menuY = Math.min(y, window.innerHeight - 200);
 
       const menu = document.createElement('div');
       menu.id = 'pe-ctx-menu';
-      menu.style.cssText = `left:${x}px;top:${y}px`;
+      menu.style.cssText = `left:${menuX}px;top:${menuY}px`;
 
       function addItem(svgD, label, action) {
         const item = document.createElement('button');
@@ -1477,7 +1686,7 @@
         if (menu.contains(ev.target)) return;
         removeCtxMenu();
       };
-      
+
       const onEsc = ev => {
         if (ev.key === 'Escape') removeCtxMenu();
       };
@@ -1489,13 +1698,142 @@
         _cleanupCtxMenu = null;
       };
 
+      // On touch, use a longer delay so the finger-lift tap doesn't
+      // immediately close the menu before the user can read it.
       setTimeout(() => {
-        if (!_cleanupCtxMenu) return; // Menu might have been closed synchronously
+        if (!_cleanupCtxMenu) return;
         document.addEventListener('click',       onClose);
         document.addEventListener('contextmenu', onClose);
         document.addEventListener('keydown',     onEsc);
-      }, 0);
+      }, isTouch ? 300 : 0);
+    }
+
+    document.addEventListener('contextmenu', e => {
+      // Suppress native contextmenu on Android when our long-press already fired
+      if (_lpJustShown) { e.preventDefault(); return; }
+      const media = getMediaInfo(e.target);
+      if (!media) { removeCtxMenu(); return; }
+      e.preventDefault();
+      showCtxMenuAt(e.clientX, e.clientY, media, false);
     }, true);
+
+    // ── Long-press for mobile context menu (iOS + Android fallback) ──
+    document.addEventListener('touchstart', e => {
+      const touch = e.touches[0];
+      _lpStartX   = touch.clientX;
+      _lpStartY   = touch.clientY;
+      _lpScrolled = false;
+      clearTimeout(_lpTimer);
+      _lpTimer = setTimeout(() => {
+        _lpTimer = null;
+        if (_lpScrolled) return;
+        const el = document.elementFromPoint(_lpStartX, _lpStartY);
+        if (!el) return;
+        const media = getMediaInfo(el);
+        if (!media) return;
+        // Prevent the Android contextmenu event (fired ~20 ms later) from
+        // duplicating the menu we're about to show.
+        _lpJustShown = true;
+        setTimeout(() => { _lpJustShown = false; }, 400);
+        showCtxMenuAt(_lpStartX, _lpStartY, media, true);
+        if (navigator.vibrate) navigator.vibrate(30);
+      }, 600);
+    }, { passive: true });
+
+    document.addEventListener('touchmove', e => {
+      if (_lpScrolled) return;
+      const touch = e.changedTouches[0];
+      if (Math.abs(touch.clientX - _lpStartX) > 10 || Math.abs(touch.clientY - _lpStartY) > 10) {
+        _lpScrolled = true;
+        clearTimeout(_lpTimer);
+        _lpTimer = null;
+      }
+    }, { passive: true });
+
+    document.addEventListener('touchend', () => {
+      clearTimeout(_lpTimer);
+      _lpTimer = null;
+    }, { passive: true });
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  MODULE: MOBILE LAZY-LOAD FIX
+  // ═══════════════════════════════════════════════════════════════════
+  // Pinterest on mobile aggressively defers image loading via loading="lazy"
+  // and data-src attributes. On large feeds or slow devices many images that
+  // are already visible on screen never actually load.
+  // Uses IntersectionObserver with a generous 600 px rootMargin so images
+  // are fetched well before reaching the viewport edge.
+  // Also force-copies data-src → src for GIF images that are already
+  // visible but whose lazy-loader hasn't fired yet.
+  function initMobileLazyFix() {
+    if (!IS_MOBILE) return;
+
+    const io = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const el = entry.target;
+
+        if (el.tagName === 'IMG') {
+          // Lift native lazy-loading so the browser fetches immediately
+          if (el.getAttribute('loading') === 'lazy') el.setAttribute('loading', 'eager');
+          // Copy data-src → src if Pinterest's own lazy-loader hasn't fired yet
+          const ds = el.getAttribute('data-src');
+          if (ds && (!el.src || el.src === location.href)) el.src = ds;
+          io.unobserve(el);
+          return;
+        }
+
+        if (el.tagName === 'VIDEO') {
+          // Mobile GIFs are often <video> with lazy data-src values.
+          hydrateVideoSource(el);
+          el.preload = 'auto';
+          el.playsInline = true;
+          if (el.readyState === 0) {
+            try { el.load(); } catch (_) {}
+          }
+          // Mark as GIF-video when applicable so GIF modules can manage it.
+          if (isGifVideo(el, findGifContainer(el))) el.__peGifVid = true;
+          io.unobserve(el);
+        }
+      });
+    }, { rootMargin: '600px 0px', threshold: 0 });
+
+    function observeMedia(root) {
+      if (!root || !root.querySelectorAll) return;
+      root.querySelectorAll('img[loading="lazy"], img[data-src*="pinimg.com"], video').forEach(el => {
+        // Only observe videos that look like Pinterest GIF media.
+        if (el.tagName === 'VIDEO') {
+          const hasLazySource = !!el.querySelector('source[data-src]');
+          const src = getVideoSrc(el);
+          if (!hasLazySource && !/pinimg\.com/i.test(src)) return;
+        }
+        if (el.__peLazyObs) return;
+        el.__peLazyObs = true;
+        io.observe(el);
+      });
+    }
+
+    observeMedia(document);
+
+    new MutationObserver(records => {
+      records.forEach(r => r.addedNodes.forEach(n => {
+        if (!n || n.nodeType !== 1) return;
+        if (n.tagName === 'IMG') {
+          if (!n.__peLazyObs) { n.__peLazyObs = true; io.observe(n); }
+        } else if (n.tagName === 'VIDEO') {
+          const hasLazySource = !!n.querySelector('source[data-src]');
+          const src = getVideoSrc(n);
+          if ((hasLazySource || /pinimg\.com/i.test(src)) && !n.__peLazyObs) {
+            n.__peLazyObs = true;
+            io.observe(n);
+          }
+        } else {
+          observeMedia(n);
+        }
+      }));
+    }).observe(document.documentElement, { childList: true, subtree: true });
   }
 
 
@@ -1776,6 +2114,63 @@
       .pe-ctx-item:hover { background: #f5f5f5; }
       .pe-ctx-item + .pe-ctx-item { border-top: 1px solid #f0f0f0; }
       .pe-ctx-item svg { flex-shrink: 0; color: #555; }
+
+      /* ──────── Mobile / Touch support ──────── */
+      /* Remove 300ms tap delay on all interactive elements */
+      #pe-settings-btn, #pe-bd-btn, #pe-reload-btn,
+      .pe-ctx-item, .pe-row, .pe-bd-opt, .pe-group-header, .pe-switch {
+        touch-action: manipulation;
+      }
+
+      /* Settings panel: scrollable and viewport-safe on small screens */
+      #pe-settings-panel {
+        max-height: calc(100dvh - 80px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        max-width: calc(100vw - 12px);
+        -webkit-overflow-scrolling: touch;
+      }
+
+      /* Board downloader menu: same treatment */
+      #pe-bd-menu {
+        max-height: calc(100dvh - 130px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+        max-width: calc(100vw - 12px);
+      }
+
+      /* Larger tap targets on touch devices (Apple HIG ≥ 44 px) */
+      @media (pointer: coarse) {
+        /* Smaller FABs on touch screens so they don't obscure pins */
+        #pe-settings-btn { width: 34px; height: 34px; }
+        #pe-bd-btn        { width: 44px; height: 44px; }
+        /* Generous tap targets for rows / menu items (≥ 44 px) */
+        .pe-row, .pe-group-header { padding: 10px 14px; min-height: 48px; }
+        .pe-sub-row  { min-height: 48px; }
+        .pe-ctx-item { padding: 13px 16px; min-height: 48px; }
+        .pe-bd-opt   { min-height: 48px; padding: 13px 16px; }
+      }
+
+      /* Prevent panels exceeding viewport width on very narrow screens */
+      @media (max-width: 320px) {
+        #pe-settings-panel { min-width: unset; width: calc(100vw - 12px); }
+        #pe-ctx-menu       { min-width: unset; width: calc(100vw - 24px); }
+      }
+
+      /* ──────── Mobile performance: reduce GPU over-composition ──────── */
+      @media (pointer: coarse) {
+        /* Pinterest promotes every pin card to its own GPU compositing layer
+           via will-change, which exhausts GPU memory and causes scroll jank.
+           Resetting it lets the browser decide when a layer is actually needed. */
+        [data-test-id="pinWrapper"] {
+          will-change: auto !important;
+        }
+        /* Async image decoding keeps the main thread free while the user scrolls */
+        [data-test-id="pinWrapper"] img {
+          decoding: async;
+        }
+      }
     `;
     (document.head || document.documentElement).appendChild(s);
   }
@@ -1825,6 +2220,9 @@
 
     // Settings panel
     createSettingsPanel();
+
+    // Mobile: pre-load lazy images and fix GIF loading
+    initMobileLazyFix();
 
     console.log('[Pinterest Power Menu] v2.1.0 loaded ✓');
   }

@@ -31,7 +31,7 @@
 ### 🖼️ Original Quality Images
 Pinterest serves downscaled thumbnails by default. This script silently rewrites every image URL to load the **full original resolution** from Pinterest's CDN — no popups, no loading delays. Falls back to high-res (`736x`) if the original isn't available.
 
-### 🚫 No Registration Required
+### 🚫 No Registration Required (Needs fixing - Doesnt work or works a little)
 Auto-removes all login/signup modals and paywalls the moment they appear so you can browse freely without an account.
 
 ### 💾 Download Fixer

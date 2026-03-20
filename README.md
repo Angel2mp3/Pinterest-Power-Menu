@@ -18,7 +18,7 @@
 
 > While this script can do a lot on its own, it does not block most ads, so i **highly recomend** you install [Ublock Origin](https://github.com/gorhill/uBlock) as it works very well alongside it!
 
-[![Install Pinterest Power Menu](https://img.shields.io/badge/%E2%AC%87%EF%B8%8F%20Install%20Script-Pinterest%20Power%20Menu-E60023?style=for-the-badge&logoColor=white)](https://github.com/Angel2mp3/pinterest-power-menu/raw/main/PinterestEnhanced.user.js)
+[![Install Pinterest Power Menu](https://img.shields.io/badge/%E2%AC%87%EF%B8%8F%20Install%20Script-Pinterest%20Power%20Menu-E60023?style=for-the-badge&logoColor=white)](https://github.com/Angel2mp3/Pinterest-Power-Menu/raw/main/PinterestPowerMenu.user.js)
 
 *Click the button above → the extension will open and ask you to confirm the install.*
 

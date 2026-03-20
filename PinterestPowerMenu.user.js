@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
 // @namespace    https://github.com/Angel2mp3
-// @version      1.0.0
+// @version      1.1.0
 // @description  All-in-one Pinterest power tool: original quality, no registration walls, download fixer, board folder downloader, GIF hover/auto-play, remove videos, hide Visit Site, declutter, hide UI elements
 // @author       Angel2mp3
 // @icon         https://www.pinterest.com/favicon.ico
@@ -33,6 +33,7 @@
     hideVisitSite:    true,
     boardDownloader:  true,
     declutter:        true,
+    contextMenu:      true,
     hideUpdates:      false,
     hideMessages:     false,
     hideShare:        false,
@@ -782,6 +783,10 @@
       const badge = sidebarItem?.parentElement?.querySelector('.MIw[style*="pointer-events: none"]');
       if (badge) collapseEl(badge);
     }
+    // Pin card notification badges (the floating status dot on pins)
+    document.querySelectorAll('[aria-label="Notifications"][role="status"]').forEach(el => {
+      collapseEl(el.parentElement || el);
+    });
   }
 
   let _declutterListObs = null;
@@ -911,37 +916,36 @@
     return stripped.length ? stripped : name;
   }
 
-  function randStr(len) {
-    const c = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  function randDigits(len) {
     let r = '';
-    for (let i = 0; i < len; i++) r += c[Math.floor(Math.random() * c.length)];
+    for (let i = 0; i < len; i++) r += String(Math.floor(Math.random() * 10));
     return r;
   }
 
-  function extractPinTitle() {
-    for (const s of [
-      '[data-test-id="closeup-title"] h1',
-      '[data-test-id="pin-title"]',
-      'h1[itemprop="name"]',
-    ]) {
-      const el = document.querySelector(s);
-      if (el?.textContent?.trim()) return sanitizeFilename(el.textContent.trim());
-    }
-    const meta = document.querySelector('meta[property="og:title"]');
-    if (meta?.content) {
-      const t = meta.content.trim();
-      if (t !== 'Pinterest') return sanitizeFilename(t);
+  function makeFallbackPinName() {
+    return `Pin - ${randDigits(8)}`;
+  }
+
+  const PIN_TITLE_SELECTORS = [
+    '[data-test-id="pin-title"]',
+    '[data-test-id="closeup-title"] h1',
+    '[data-test-id="pinrep-footer-organic-title"] a',
+    '[data-test-id="pinrep-footer-organic-title"] h2',
+    'h1[itemprop="name"]',
+  ];
+
+  function extractPinTitleFromScope(scope) {
+    if (!scope || !scope.querySelector) return null;
+    for (const s of PIN_TITLE_SELECTORS) {
+      const el = scope.querySelector(s);
+      const t = sanitizeFilename(el?.textContent?.trim());
+      if (t) return t;
     }
     return null;
   }
 
-  // Strip any Pinterest auto-generated alt-text prefix from an alt string and
-  // return the real title, or null if there's nothing useful left.
-  const ALT_JUNK = /^(this\s+(image\s+)?(may\s+contain|contains?\s+(an\s+image\s+of|image\s+of|a\s+photo\s+of))|image\s+may\s+contain|photo\s+may\s+contain)[:\s]*/i;
-  function cleanAlt(raw) {
-    if (!raw) return null;
-    const s = raw.replace(ALT_JUNK, '').trim();
-    return s || null;
+  function extractPinTitle() {
+    return extractPinTitleFromScope(document);
   }
 
   // Upgrade any pinimg thumbnail URL to /originals/ for max quality
@@ -1024,17 +1028,15 @@
       try { buf = await fetchBinary(u); break; } catch (_) {}
     }
 
-    if (!buf) {
-      console.error('[Pinterest Power Menu] Download failed: all URLs blocked for', imageUrl);
-      return;
-    }
+    if (!buf) return;
 
     try {
       const ext      = detectFileType(new Uint8Array(buf));
-      // Strip any pre-existing extension so we never produce "photo.jpg.jpg"
-      // or a mismatched "photo.jpg.gif" — the binary-detected ext is always used.
-      const rawTitle = cleanAlt(filename) || filename || null;
-      const basePart = stripKnownExt(sanitizeFilename(rawTitle) || extractPinTitle() || `pin-${randStr(15)}`);
+      // Use only explicit pin titles. If no title exists, fall back to:
+      // "Pin - 12345678".
+      const explicitTitle = stripKnownExt(sanitizeFilename(filename || ''));
+      const pageTitle     = stripKnownExt(extractPinTitle() || '');
+      const basePart      = explicitTitle || pageTitle || makeFallbackPinName();
       const name     = basePart + ext;
       const blob     = new Blob([buf]);
       const a        = document.createElement('a');
@@ -1042,9 +1044,7 @@
       a.download     = name;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-    } catch (e) {
-      console.error('[Pinterest Power Menu] Download failed:', e);
-    }
+    } catch (_) {}
   }
 
   function initDownloadFixer() {
@@ -1094,20 +1094,24 @@
   // Snapshot whatever pin images are currently in the DOM into the
   // accumulator set.  Called repeatedly while scrolling so we catch
   // images before Pinterest's virtual list recycles those DOM nodes.
-  // Also captures pin names (from img.alt) into the names Map.
+  // Also captures pin titles from title elements in each pin card.
   function snapshotPinUrls(seen, urls, names) {
     document.querySelectorAll('img[src*="i.pinimg.com"]').forEach(img => {
       // Skip tiny avatars/icons
       const w = img.naturalWidth || img.width;
       if (w && w < 80) return;
+      // Skip images inside the "More Ideas" / suggested section at the bottom of boards
+      if (img.closest('.moreIdeasOnBoard, [href*="more-ideas"], [href*="/_tools/"]')) return;
       let url = img.src;
       const m = url.match(OQ_RE);
       if (m) url = m[1] + '/originals' + m[2];
       if (!seen.has(url)) {
+        const pinScope = img.closest(
+          '[data-test-id="pinWrapper"], [data-grid-item="true"], [data-test-id="pin"], div[role="listitem"]'
+        );
         seen.add(url);
         urls.push(url);
-        // Use img alt text as the pin name (Pinterest puts the title/desc there)
-        names.set(url, sanitizeFilename(cleanAlt(img.alt)));
+        names.set(url, extractPinTitleFromScope(pinScope));
       }
     });
   }
@@ -1149,12 +1153,6 @@
     return autoScrollAndCollect(setStatus);
   }
 
-  function getBoardName() {
-    return sanitizeFilename(
-      document.title.replace(/\s*[-–|].*$/, '').trim()
-    ) || 'pinterest-board';
-  }
-
   // Fetch up to `concurrency` URLs in parallel, calling onProgress after each.
   async function fetchParallel(urls, concurrency, onProgress) {
     const results = new Array(urls.length).fill(null);
@@ -1170,60 +1168,19 @@
     return results;
   }
 
-  // ─── Save images to a chosen folder (or named downloads) ────────
+  // ─── Save all board images as named downloads ───────────────────
   async function downloadBoardFolder(setStatus) {
     const { urls, names } = await collectAllPins(setStatus);
     if (!urls.length) { alert('[Pinterest Power Menu] No images found on this board.'); return; }
 
-    const boardName = getBoardName();
-
-    // Build per-file names: "BoardName - PinTitle" or "BoardName - xxxxxxxx"
-    // Cap pinName at 80 chars so full path stays filesystem-safe.
+    // Use pin title only. If unavailable, use: "Pin - 12345678".
     function makeFileName(url, ext) {
-      // Strip any pre-existing extension so we never get "BoardName - photo.jpg.gif"
-      let pinName = stripKnownExt(names.get(url) || randStr(8));
-      if (pinName.length > 80) pinName = pinName.slice(0, 80).trimEnd();
-      return `${boardName} - ${pinName}${ext}`;
+      let pinName = stripKnownExt(sanitizeFilename(names.get(url) || ''));
+      if (!pinName) pinName = makeFallbackPinName();
+      if (pinName.length > 120) pinName = pinName.slice(0, 120).trimEnd();
+      return `${pinName}${ext}`;
     }
 
-    let dirHandle = null;
-
-    // Try the File System Access API so the user can pick a folder
-    if (typeof window.showDirectoryPicker === 'function') {
-      try {
-        dirHandle = await window.showDirectoryPicker({ mode: 'readwrite', startIn: 'downloads' });
-      } catch (e) {
-        if (e.name === 'AbortError') { setStatus('cancelled', 0, 0); return; }
-        dirHandle = null;
-      }
-    }
-
-    if (!dirHandle && typeof window.showDirectoryPicker !== 'function') {
-      // Fallback: individual <a download> links
-      const bufs = await fetchParallel(urls, 5, (done, total) =>
-        setStatus('fetch', done, total)
-      );
-      let saved = 0;
-      for (let i = 0; i < bufs.length; i++) {
-        const buf = bufs[i];
-        if (!buf) continue;
-        const ext      = detectFileType(new Uint8Array(buf));
-        const fileName = `${boardName}/${makeFileName(urls[i], ext)}`;
-        try {
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(new Blob([buf]));
-          a.download = fileName;
-          a.click();
-          setTimeout(() => URL.revokeObjectURL(a.href), 200);
-          await new Promise(r => setTimeout(r, 300));
-          saved++;
-        } catch (_) {}
-      }
-      setStatus('done', saved, urls.length);
-      return;
-    }
-
-    // We have a dirHandle – save directly into the chosen folder
     const bufs = await fetchParallel(urls, 5, (done, total) =>
       setStatus('fetch', done, total)
     );
@@ -1235,10 +1192,12 @@
       const ext      = detectFileType(new Uint8Array(buf));
       const fileName = makeFileName(urls[i], ext);
       try {
-        const fh = await dirHandle.getFileHandle(fileName, { create: true });
-        const wr = await fh.createWritable();
-        await wr.write(new Blob([buf]));
-        await wr.close();
+        const a    = document.createElement('a');
+        a.href     = URL.createObjectURL(new Blob([buf]));
+        a.download = fileName;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 200);
+        await new Promise(r => setTimeout(r, 300));
         saved++;
       } catch (_) {}
     }
@@ -1262,9 +1221,9 @@
         <div id="pe-bd-status" style="display:none"></div>
         <button class="pe-bd-opt" id="pe-bd-folder">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-            <path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/>
+            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 19v2h14v-2H5z"/>
           </svg>
-          Save to Folder
+          Download All Pins
         </button>
       </div>
       <button id="pe-bd-btn" title="Download Board">
@@ -1325,9 +1284,10 @@
     { key: 'downloadFixer',   label: 'Download Fixer',         desc: 'Proper filenames & format detection',                      reload: true  },
     { key: 'gifHover',        label: 'GIF Hover Play',         desc: 'GIFs play on hover, pause on leave',                       reload: false },
     { key: 'gifAutoPlay',     label: 'Auto-Play Visible GIFs', desc: 'Auto-play all GIFs on screen, stop when scrolled away',    reload: false },
-    { key: 'boardDownloader', label: 'Board Downloader',       desc: 'Save board images to a folder',                           reload: true  },
+    { key: 'boardDownloader', label: 'Board Downloader',       desc: 'Download all images from the current board',              reload: true  },
     { key: 'declutter',       label: 'Declutter',              desc: 'Remove ads, quizzes, sponsored & shopping pins',           reload: false },
     { key: 'removeVideos',    label: 'Remove Videos',          desc: 'Remove all video pins from the feed',                      reload: false },
+    { key: 'contextMenu',     label: 'Image Context Menu',     desc: 'Right-click pins to copy, open or save the original',      reload: false },
   ];
 
   const HIDE_FEATURES = [
@@ -1425,6 +1385,7 @@
         if (key === 'gifAutoPlay') { if (cb.checked) initGifAutoPlay(); else stopGifAutoPlay(); }
         if (key === 'declutter') { if (cb.checked) initDeclutter(); }
         if (key === 'removeVideos') { if (cb.checked) initRemoveVideos(); }
+        if (key === 'contextMenu') { if (cb.checked) initImageContextMenu(); }
         if (key === 'hideUpdates' || key === 'hideMessages' || key === 'hideShare') applyNavToggles();
         if (cb.dataset.reload === 'true')
           wrap.querySelector('#pe-notice').style.display = 'flex';
@@ -1448,6 +1409,7 @@
     // would compete with native browser actions (text selection, system menus),
     // so we skip the entire module on touch devices.
     if (IS_MOBILE) return;
+    if (!get('contextMenu')) return;
 
     let _ctxMenu = null;
     let _cleanupCtxMenu = null;
@@ -1460,13 +1422,7 @@
     function getMediaInfo(target) {
       let card = target.closest ? target.closest('[data-test-id="pin"], [data-grid-item="true"], [data-test-id="pin-closeup-image"], .PinCard') : null;
       let wrap = target.closest ? target.closest('[data-test-id="pinWrapper"], [data-test-id="pin-closeup-image"]') : null;
-      let title = null;
-
-      if (card) {
-        // Try extracting title from the wrapper DOM
-        const titleEl = card.querySelector('[data-test-id="pinrep-footer-organic-title"] a, [data-test-id="pinrep-footer-organic-title"] h2, [data-test-id="pin-title"], [data-test-id="closeup-title"] h1');
-        if (titleEl && titleEl.textContent) title = titleEl.textContent.trim();
-      }
+      let title = extractPinTitleFromScope(card || wrap);
 
       if (wrap) {
         // Video
@@ -1497,20 +1453,6 @@
       }
 
       if (!img) return null;
-
-      if (!title) {
-        title = cleanAlt(img.getAttribute('alt'));
-      }
-      
-      if (!title && card) {
-         // Fallback to aria-label on the main pin link
-         const link = card.querySelector('a[href*="/pin/"]');
-         if (link) {
-           let aria = link.getAttribute('aria-label') || '';
-           aria = aria.replace(/pin page$/i, '').trim();
-           if (aria) title = aria;
-         }
-      }
 
       // Now determine if it's a GIF or Image
       // 1. Is it actively playing a GIF? (hover/auto-play swaps src)
@@ -1638,9 +1580,7 @@
         async () => {
           try {
             await copyMediaToClipboard(origUrl, type);
-          } catch (err) {
-            console.warn('[Pinterest Power Menu] Copy media failed:', err);
-          }
+          } catch (_) {}
         }
       );
 
@@ -1709,6 +1649,7 @@
     }
 
     document.addEventListener('contextmenu', e => {
+      if (!get('contextMenu')) { removeCtxMenu(); return; }
       // Suppress native contextmenu on Android when our long-press already fired
       if (_lpJustShown) { e.preventDefault(); return; }
       const media = getMediaInfo(e.target);
@@ -1719,6 +1660,7 @@
 
     // ── Long-press for mobile context menu (iOS + Android fallback) ──
     document.addEventListener('touchstart', e => {
+      if (!get('contextMenu')) return;
       const touch = e.touches[0];
       _lpStartX   = touch.clientX;
       _lpStartY   = touch.clientY;
@@ -2040,7 +1982,7 @@
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       }
       #pe-bd-btn {
-        width: 52px; height: 52px;
+        width: 40px; height: 40px;
         border-radius: 50%;
         background: #e60023; color: #fff; border: none;
         cursor: pointer;
@@ -2144,7 +2086,7 @@
       @media (pointer: coarse) {
         /* Smaller FABs on touch screens so they don't obscure pins */
         #pe-settings-btn { width: 34px; height: 34px; }
-        #pe-bd-btn        { width: 44px; height: 44px; }
+        #pe-bd-btn        { width: 34px; height: 34px; }
         /* Generous tap targets for rows / menu items (≥ 44 px) */
         .pe-row, .pe-group-header { padding: 10px 14px; min-height: 48px; }
         .pe-sub-row  { min-height: 48px; }
@@ -2223,8 +2165,6 @@
 
     // Mobile: pre-load lazy images and fix GIF loading
     initMobileLazyFix();
-
-    console.log('[Pinterest Power Menu] v2.1.0 loaded ✓');
   }
 
   if (document.readyState === 'loading')

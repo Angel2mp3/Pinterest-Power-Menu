@@ -51,6 +51,7 @@ Optionally auto-play every GIF currently visible in the viewport. GIFs pause aut
 Collapses video pins from your feed while **leaving GIFs untouched**. Detects real video pins via Pinterest's CDN (`v.pinimg.com`) so animated GIFs (served from `i.pinimg.com`) are never wrongly removed.
 
 ### 🧹 Declutter
+#### (Built on top of and added more from the original version by August4067)
 Removes noise from your feed without leaving blank gaps in the grid:
 - Sponsored pins
 - Shopping / shoppable pins
@@ -72,6 +73,7 @@ Individual toggles for UI elements you might not want:
 | **Hide Updates Bell** | The notifications/updates bell in the nav |
 | **Hide Messages Button** | The Messages / chat button in the nav |
 | **Hide Share Button** | The Share / Send button on pin closeups |
+| **Hide Currated Spotlights** | Hides all of those mainly from the search page |
 
 ### 🚫 No Registration Required (Needs Fixing)
 Attempts to auto-remove all login/signup modals the moment they appear so you can browse freely without an account.
@@ -88,8 +90,8 @@ The script runs on Pinterest's mobile web inside mobile browsers that support us
 | No Registration Wall | ✅ Works |
 | Download Fixer | ✅ Works |
 | Board Downloader | ✅ Works |
-| **GIF Hover Play** | ❌ Desktop only — hover requires a mouse. Toggle it off and use Auto-Play instead. |
-| **Auto-Play Visible GIFs** |❓ May or may not work |
+| **GIF Hover Play** | ➖ Desktop only — hover requires a mouse. Toggle it off and use Auto-Play instead. |
+| **Auto-Play Visible GIFs** | ✅ Works |
 | Remove Videos | ✅ Works |
 | Declutter | ✅ Works |
 | Hide UI Elements | ➖ Not all of them may work |

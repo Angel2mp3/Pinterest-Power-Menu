@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
 // @namespace    https://github.com/Angel2mp3
-// @version      1.1.0
+// @version      1.2.1
 // @description  All-in-one Pinterest power tool: original quality, no registration walls, download fixer, board folder downloader, GIF hover/auto-play, remove videos, hide Visit Site, declutter, hide UI elements
 // @author       Angel2mp3
 // @icon         https://www.pinterest.com/favicon.ico
@@ -25,6 +25,13 @@
   //  SETTINGS
   // ═══════════════════════════════════════════════════════════════════
   const SETTINGS_KEY = 'pe_settings_v1';
+
+  // ── Mobile / touch detection ─────────────────────────────────────────
+  // Declared early so DEFAULTS can reference it (contextMenu off on mobile).
+  // Gates features that are mouse-only or cause jank on touch devices.
+  const IS_MOBILE = /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent)
+    || (navigator.maxTouchPoints > 1 && /macintel/i.test(navigator.platform));
+
   const DEFAULTS = {
     originalQuality:  true,
     noRegistration:   true,
@@ -33,10 +40,11 @@
     hideVisitSite:    true,
     boardDownloader:  true,
     declutter:        true,
-    contextMenu:      true,
+    contextMenu:      !IS_MOBILE,  // mouse-only feature; off by default on mobile
     hideUpdates:      false,
     hideMessages:     false,
     hideShare:        false,
+    hideSpotlight:    false,
     gifAutoPlay:      false,
     removeVideos:     false,
   };
@@ -68,11 +76,6 @@
   }
 
   loadCfg();
-
-  // ── Mobile / touch detection ─────────────────────────────────────────
-  // Gates features that are mouse-only or cause jank on touch devices.
-  const IS_MOBILE = /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent)
-    || (navigator.maxTouchPoints > 1 && /macintel/i.test(navigator.platform));
 
   // Utility: returns a debounced version of fn (resets timer on every call).
   function debounce(fn, ms) {
@@ -139,15 +142,19 @@
     'div[data-test-id="signup"]',
     'div[data-test-id="fullPageSignupModal"]',
     'div[data-test-id="giftWrap"]',
-    'div[data-test-id="register-view"]',
-    '[data-test-id="RegisterModal"]',
-    '.RegisterModal',
-    'div[data-test-id="unauth-home-feed"]',
+    // 'div[data-test-id="register-view"]' — removed: now matches the login modal
+    // '[data-test-id="RegisterModal"]'    — removed: now matches the login modal
+    // '.RegisterModal'                    — removed: now matches the login modal
+    // 'div[data-test-id="unauth-home-feed"]' — removed: new homepage redesign; breaks login
   ];
 
   function removeModals() {
     if (!get('noRegistration')) return;
-    MODAL_SELS.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
+    MODAL_SELS.forEach(s => document.querySelectorAll(s).forEach(el => {
+      // Never remove a modal that contains a login/password field — that's the login form
+      if (el.querySelector('input[type="password"], input[name="id"], input[autocomplete="username"]')) return;
+      el.remove();
+    }));
     if (document.body && document.body.style.overflow === 'hidden')
       document.body.style.overflow = '';
   }
@@ -167,9 +174,10 @@
 
   function applyNavToggles() {
     if (!document.body) return;
-    document.body.classList.toggle('pe-hide-updates',  get('hideUpdates'));
-    document.body.classList.toggle('pe-hide-messages', get('hideMessages'));
-    document.body.classList.toggle('pe-hide-share',    get('hideShare'));
+    document.body.classList.toggle('pe-hide-updates',    get('hideUpdates'));
+    document.body.classList.toggle('pe-hide-messages',   get('hideMessages'));
+    document.body.classList.toggle('pe-hide-share',      get('hideShare'));
+    document.body.classList.toggle('pe-hide-spotlight',  get('hideSpotlight'));
   }
 
   // JS-based "Visit site" link removal – catches links that CSS alone misses
@@ -399,7 +407,31 @@
     return false;
   }
 
+  // Detect the mobile/touch layout GIF pin — Pinterest renders these with
+  // JPEG-only srcset; the GIF container data-test-ids identify them reliably.
+  function isMobileGifPin(container) {
+    if (!container) return false;
+    if (container.querySelector('[data-test-id="inp-perf-pinType-gif"]')) return true;
+    if (container.querySelector('[data-test-id="pincard-gif-without-link"]')) return true;
+    const badge = container.querySelector('[data-test-id="PinTypeIdentifier"]');
+    if (badge) {
+      const t = (badge.textContent || '').trim().toLowerCase();
+      if (t === 'gif' || t.includes('animated')) return true;
+    }
+    return false;
+  }
+
+  // Convert a pinimg.com JPEG/WebP thumbnail URL to the /originals/ GIF URL.
+  // e.g. …/236x/ab/cd/ef/hash.jpg → …/originals/ab/cd/ef/hash.gif
+  function deriveGifUrl(jpegUrl) {
+    if (!jpegUrl) return null;
+    const m = jpegUrl.match(/^(https?:\/\/i\.pinimg\.com)\/[^/]+(\/.+?)(?:\.jpe?g|\.webp)(\?.*)?$/i);
+    if (!m) return null;
+    return m[1] + '/originals' + m[2] + '.gif';
+  }
+
   // Extract the .gif URL from an img element, checking srcset, live src, and data-src.
+  // On mobile Pinterest uses JPEG-only srcset for GIF pins; derive the .gif URL when needed.
   function getGifSrcFromImg(img) {
     if (!img) return null;
     // Prefer srcset (Pinterest hides the GIF at "4x"; also stored in __peAutoOrigSrcset)
@@ -413,6 +445,22 @@
     // Lazy-loaded src attribute
     const ds = img.getAttribute('data-src') || '';
     if (/\.gif(\?|$)/i.test(ds)) return ds;
+    // Mobile layout: GIF pins have JPEG-only srcset but carry inp-perf-pinType-gif /
+    // pincard-gif-without-link in their container. Derive the originals .gif URL.
+    const wrap = img.closest('[data-test-id="pinWrapper"], [data-grid-item="true"], [data-test-id="pin"]');
+    if (isMobileGifPin(wrap)) {
+      const jpegSrc = img.getAttribute('src') || img.src || '';
+      if (jpegSrc) {
+        const d = deriveGifUrl(jpegSrc);
+        if (d) return d;
+      }
+      // Fallback: try highest-res srcset entry
+      const parts = srcset.split(',').map(p => p.trim().split(/\s+/)[0]).filter(Boolean);
+      for (let i = parts.length - 1; i >= 0; i--) {
+        const d = deriveGifUrl(parts[i]);
+        if (d) return d;
+      }
+    }
     return null;
   }
 
@@ -499,8 +547,9 @@
       const pinWrapper = findGifContainer(e.target);
       if (!pinWrapper || pinWrapper === _gifActiveCont) return;
 
-      // Look for a GIF image inside this pin card
-      const img = pinWrapper.querySelector(GIF_IMG_SEL);
+      // Look for a GIF image inside this pin card (incl. mobile JPEG-srcset GIF pins)
+      const img = pinWrapper.querySelector(GIF_IMG_SEL)
+               || (isMobileGifPin(pinWrapper) ? pinWrapper.querySelector('img') : null);
       if (!img) return;
       const gifUrl = getGifSrcFromImg(img);
       if (!gifUrl) return;
@@ -550,7 +599,8 @@
       if (!el) return;
       const pinWrapper = findGifContainer(el);
       if (!pinWrapper) { pauseActiveGif(); return; }
-      const img    = pinWrapper.querySelector(GIF_IMG_SEL);
+      const img    = pinWrapper.querySelector(GIF_IMG_SEL)
+                  || (isMobileGifPin(pinWrapper) ? pinWrapper.querySelector('img') : null);
       const gifUrl = img ? getGifSrcFromImg(img) : null;
       if (!gifUrl) {
         // No img-based GIF – check for a mobile video-based GIF
@@ -594,8 +644,9 @@
   let _gifAutoMO = null;   // MutationObserver for new pins
 
   function startGifInView(wrapper) {
-    // ── img-based GIF (desktop + most mobile) ──────────────────────
-    const img = wrapper.querySelector(GIF_IMG_SEL);
+    // ── img-based GIF (desktop + most mobile, including mobile JPEG-srcset GIFs) ──
+    const img = wrapper.querySelector(GIF_IMG_SEL)
+             || (isMobileGifPin(wrapper) ? wrapper.querySelector('img') : null);
     if (img && !img.__peAutoPlaying) {
       const gifUrl = getGifSrcFromImg(img);
       if (gifUrl) {
@@ -646,7 +697,7 @@
     if (!_gifAutoIO) return;
     document.querySelectorAll(GIF_PIN_CONTAINER_SEL).forEach(wrapper => {
       if (wrapper.__peAutoObs) return;
-      // Detect img-based GIF or video-based GIF (mobile)
+      // Detect img-based GIF, video-based GIF, or mobile JPEG-srcset GIF
       const hasGifImg = !!wrapper.querySelector(GIF_IMG_SEL);
       const hasGifVid = (() => {
         const vid = wrapper.querySelector('video');
@@ -654,7 +705,8 @@
         if (vid.__peGifVid) return true; // already confirmed as a GIF video
         return isGifVideo(vid, wrapper);
       })();
-      if (!hasGifImg && !hasGifVid) return;
+      const hasMobileGif = !hasGifImg && !hasGifVid && isMobileGifPin(wrapper);
+      if (!hasGifImg && !hasGifVid && !hasMobileGif) return;
       wrapper.__peAutoObs = true;
       _gifAutoIO.observe(wrapper);
     });
@@ -663,7 +715,8 @@
   function initGifAutoPlay() {
     if (_gifAutoIO) return;
     _gifAutoIO = new IntersectionObserver(entries => {
-      if (!get('gifAutoPlay')) return;
+      // Skip when feature is off or tab is hidden (avoids playing on inactive tabs)
+      if (!get('gifAutoPlay') || document.hidden) return;
       entries.forEach(entry => {
         if (entry.isIntersecting) startGifInView(entry.target);
         else                      stopGifInView(entry.target);
@@ -785,6 +838,18 @@
     }
     // Pin card notification badges (the floating status dot on pins)
     document.querySelectorAll('[aria-label="Notifications"][role="status"]').forEach(el => {
+      collapseEl(el.parentElement || el);
+    });
+    // Shopping spotlight carousel section
+    document.querySelectorAll('[data-test-id="carousel-bubble-wrapper-shopping_spotlight"]').forEach(el => {
+      collapseEl(el.closest('div[role="listitem"]') || el.parentElement?.parentElement?.parentElement || el.parentElement || el);
+    });
+    // Curated spotlight section (search page immersive header carousel)
+    document.querySelectorAll('[data-test-id="search-story-suggestions-container"]:has([data-test-id="search-suggestion-curated-board-bubble"])').forEach(el => {
+      collapseEl(el);
+    });
+    // Pin action bar: "Read it" / "Visit site" inline button on mobile closeup
+    document.querySelectorAll('[data-test-id="pin-action-bar-container"]').forEach(el => {
       collapseEl(el.parentElement || el);
     });
   }
@@ -1291,10 +1356,11 @@
   ];
 
   const HIDE_FEATURES = [
-    { key: 'hideVisitSite',  label: 'Hide Visit Site',      desc: 'Remove all "Visit site" buttons',             reload: false },
-    { key: 'hideUpdates',    label: 'Hide Updates Bell',    desc: 'Hide the Updates / notifications button',     reload: false },
-    { key: 'hideMessages',   label: 'Hide Messages Button', desc: 'Hide the Messages chat button in the nav',    reload: false },
-    { key: 'hideShare',      label: 'Hide Share Button',    desc: 'Hide the Share / Send button on pins',        reload: false },
+    { key: 'hideVisitSite',  label: 'Hide Visit Site',          desc: 'Remove all "Visit site" buttons',                         reload: false },
+    { key: 'hideUpdates',    label: 'Hide Updates Bell',        desc: 'Hide the Updates / notifications button',                 reload: false },
+    { key: 'hideMessages',   label: 'Hide Messages Button',     desc: 'Hide the Messages chat button in the nav',                reload: false },
+    { key: 'hideShare',      label: 'Hide Share Button',        desc: 'Hide the Share / Send button on pins',                    reload: false },
+    { key: 'hideSpotlight',  label: 'Hide Curated Spotlights',  desc: 'Hide Pinterest editorial & curated content tiles',        reload: false },
   ];
 
   function createSettingsPanel() {
@@ -1386,7 +1452,7 @@
         if (key === 'declutter') { if (cb.checked) initDeclutter(); }
         if (key === 'removeVideos') { if (cb.checked) initRemoveVideos(); }
         if (key === 'contextMenu') { if (cb.checked) initImageContextMenu(); }
-        if (key === 'hideUpdates' || key === 'hideMessages' || key === 'hideShare') applyNavToggles();
+        if (key === 'hideUpdates' || key === 'hideMessages' || key === 'hideShare' || key === 'hideSpotlight') applyNavToggles();
         if (cb.dataset.reload === 'true')
           wrap.querySelector('#pe-notice').style.display = 'flex';
       });
@@ -1441,7 +1507,7 @@
         }
         img = img.parentElement;
       }
-      
+
       if (!img || img.tagName !== 'IMG' || !/pinimg\.com/i.test(img.src)) {
         if (wrap) {
            img = wrap.querySelector('img[src*="pinimg.com"]');
@@ -1459,7 +1525,7 @@
       if (/\.gif(\?|$)/i.test(img.src)) {
         return { url: img.src, type: 'gif', title };
       }
-      
+
       // 2. Does it have a GIF in its original srcset?
       const origSrcset = img.__peAutoOrigSrcset || img.getAttribute('srcset') || '';
       for (const part of origSrcset.split(',')) {
@@ -1494,7 +1560,7 @@
       }
 
       if (type === 'video' || type === 'gif') {
-        // We cannot reliably put video or animated gif binaries into the OS clipboard 
+        // We cannot reliably put video or animated gif binaries into the OS clipboard
         // without causing bugs like Discord pasting "message.txt".
         // Instead, copy the direct URL so it auto-embeds natively.
         fallbackToText();
@@ -1809,7 +1875,15 @@
       body.pe-hide-share [data-test-id="closeup-share-button"],
       body.pe-hide-share div[aria-label="Share"],
       body.pe-hide-share button[aria-label="Send"],
-      body.pe-hide-share [data-test-id="sendPinButton"] {
+      body.pe-hide-share [data-test-id="sendPinButton"],
+      body.pe-hide-share [aria-label="Send"][role="button"],
+      body.pe-hide-share [data-test-id="share-button-no-animation"],
+      body.pe-hide-share [style*="ANIMATE_SHARE_container"] {
+        display: none !important;
+      }
+
+      /* ──────── Hide Curated Spotlights ──────── */
+      body.pe-hide-spotlight [data-test-id="search-story-suggestions-container"]:has([data-test-id="search-suggestion-curated-board-bubble"]) {
         display: none !important;
       }
 
@@ -2082,14 +2156,57 @@
         max-width: calc(100vw - 12px);
       }
 
-      /* Larger tap targets on touch devices (Apple HIG ≥ 44 px) */
+      /* ──────── Touch / mobile overrides ──────── */
       @media (pointer: coarse) {
-        /* Smaller FABs on touch screens so they don't obscure pins */
-        #pe-settings-btn { width: 34px; height: 34px; }
-        #pe-bd-btn        { width: 34px; height: 34px; }
-        /* Generous tap targets for rows / menu items (≥ 44 px) */
-        .pe-row, .pe-group-header { padding: 10px 14px; min-height: 48px; }
-        .pe-sub-row  { min-height: 48px; }
+        /* Slightly smaller FABs on touch so they don't obscure pins */
+        #pe-settings-btn { width: 32px; height: 32px; }
+        #pe-bd-btn        { width: 32px; height: 32px; }
+
+        /* ── Compact settings panel on mobile ── */
+        /* Cap height to ~62% of screen and use a narrower width */
+        #pe-settings-panel {
+          max-height: min(62dvh, 420px);
+          min-width: 220px;
+          max-width: calc(100vw - 14px);
+          border-radius: 12px;
+        }
+        /* Smaller title bar */
+        #pe-settings-title {
+          font-size: 13px;
+          padding: 8px 12px 7px;
+        }
+        #pe-settings-by { font-size: 10px; }
+
+        /* Compact rows — still large enough to tap, but not 48px tall */
+        .pe-row {
+          padding: 6px 12px;
+          min-height: 38px;
+          gap: 10px;
+        }
+        .pe-group-header {
+          padding: 6px 12px;
+          min-height: 38px;
+          gap: 10px;
+        }
+        .pe-sub-row {
+          min-height: 36px;
+          padding-left: 20px !important;
+        }
+
+        /* Smaller text inside the settings panel */
+        .pe-name  { font-size: 12px; }
+        .pe-desc  { font-size: 10px; }
+
+        /* Slightly smaller toggle switch */
+        .pe-switch { width: 30px; height: 17px; }
+        .pe-knob::before { width: 11px; height: 11px; left: 3px; bottom: 3px; }
+        .pe-switch input:checked ~ .pe-knob::before { transform: translateX(13px); }
+
+        /* Compact reload notice */
+        #pe-notice { padding: 5px 12px; font-size: 11px; }
+        #pe-reload-btn { font-size: 10px; padding: 3px 8px; }
+
+        /* Context menu + board downloader keep generous tap targets */
         .pe-ctx-item { padding: 13px 16px; min-height: 48px; }
         .pe-bd-opt   { min-height: 48px; padding: 13px 16px; }
       }

@@ -6,7 +6,7 @@
 
 **The all-in-one Pinterest userscript that makes Pinterest actually good.**
 
-[![Version](https://img.shields.io/badge/version-1.1.0-red?style=flat-square)](https://github.com/Angel2mp3)
+[![Version](https://img.shields.io/badge/version-1.2.1-red?style=flat-square)](https://github.com/Angel2mp3)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
 <br/>

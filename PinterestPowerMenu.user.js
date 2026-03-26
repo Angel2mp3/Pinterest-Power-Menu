@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
 // @namespace    https://github.com/Angel2mp3
-// @version      1.2.1
-// @description  All-in-one Pinterest power tool: original quality, no registration walls, download fixer, board folder downloader, GIF hover/auto-play, remove videos, hide Visit Site, declutter, hide UI elements
+// @version      1.3.0
+// @description  All-in-one Pinterest power tool: original quality, download fixer, video downloader, board folder downloader, GIF hover/auto-play, remove videos, hide Visit Site, declutter, hide UI elements, hide shop posts, hide comments, scroll preservation
 // @author       Angel2mp3
 // @icon         https://www.pinterest.com/favicon.ico
 // @match        https://www.pinterest.com/*
@@ -34,7 +34,6 @@
 
   const DEFAULTS = {
     originalQuality:  true,
-    noRegistration:   true,
     downloadFixer:    true,
     gifHover:         true,
     hideVisitSite:    true,
@@ -44,9 +43,11 @@
     hideUpdates:      false,
     hideMessages:     false,
     hideShare:        false,
-    hideSpotlight:    false,
     gifAutoPlay:      false,
     removeVideos:     false,
+    hideShopPosts:    false,
+    hideComments:     false,
+    videoDownloader:  true,
   };
 
   let _cfg = null;
@@ -76,6 +77,38 @@
   }
 
   loadCfg();
+
+  // ─── Video URL interceptor ──────────────────────────────────────────────
+  // On desktop, Pinterest uses HLS.js which sets video.src to a blob:
+  // MediaSource URL — findPinterestVideoSrc() cannot read the actual CDN URL
+  // from the DOM.  Intercept XHR/fetch at document-start to capture
+  // v1.pinimg.com video URLs as they are requested by HLS.js, then use them
+  // as a fallback in createVideoDlFab().
+  const _interceptedVideoUrls = [];   // most-recently-seen first
+  let _onVideoUrlCapture = null;      // set after createVideoDlFab is defined
+  (function () {
+    function captureVideoUrl(url) {
+      if (typeof url !== 'string') return;
+      if (!/v1\.pinimg\.com\/videos/i.test(url)) return;
+      const idx = _interceptedVideoUrls.indexOf(url);
+      if (idx !== -1) _interceptedVideoUrls.splice(idx, 1);
+      _interceptedVideoUrls.unshift(url);                // newest first
+      if (_interceptedVideoUrls.length > 20) _interceptedVideoUrls.pop();
+      if (typeof _onVideoUrlCapture === 'function') _onVideoUrlCapture();
+    }
+    const _xOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (m, url, ...a) {
+      captureVideoUrl(String(url));
+      return _xOpen.call(this, m, url, ...a);
+    };
+    const _oFetch = window.fetch;
+    if (typeof _oFetch === 'function') {
+      window.fetch = function (input) {
+        captureVideoUrl(typeof input === 'string' ? input : (input && input.url) || '');
+        return _oFetch.apply(this, arguments);
+      };
+    }
+  })();
 
   // Utility: returns a debounced version of fn (resets timer on every call).
   function debounce(fn, ms) {
@@ -136,34 +169,6 @@
 
 
   // ═══════════════════════════════════════════════════════════════════
-  //  MODULE: NO REGISTRATION WALL
-  // ═══════════════════════════════════════════════════════════════════
-  const MODAL_SELS = [
-    'div[data-test-id="signup"]',
-    'div[data-test-id="fullPageSignupModal"]',
-    'div[data-test-id="giftWrap"]',
-    // 'div[data-test-id="register-view"]' — removed: now matches the login modal
-    // '[data-test-id="RegisterModal"]'    — removed: now matches the login modal
-    // '.RegisterModal'                    — removed: now matches the login modal
-    // 'div[data-test-id="unauth-home-feed"]' — removed: new homepage redesign; breaks login
-  ];
-
-  function removeModals() {
-    if (!get('noRegistration')) return;
-    MODAL_SELS.forEach(s => document.querySelectorAll(s).forEach(el => {
-      // Never remove a modal that contains a login/password field — that's the login form
-      if (el.querySelector('input[type="password"], input[name="id"], input[autocomplete="username"]')) return;
-      el.remove();
-    }));
-    if (document.body && document.body.style.overflow === 'hidden')
-      document.body.style.overflow = '';
-  }
-
-  new MutationObserver(removeModals)
-    .observe(document.documentElement, { childList: true, subtree: true });
-
-
-  // ═══════════════════════════════════════════════════════════════════
   //  MODULE: HIDE VISIT SITE
   // ═══════════════════════════════════════════════════════════════════
   // Uses CSS classes on <body> so toggles are instant and zero-cost.
@@ -177,7 +182,30 @@
     document.body.classList.toggle('pe-hide-updates',    get('hideUpdates'));
     document.body.classList.toggle('pe-hide-messages',   get('hideMessages'));
     document.body.classList.toggle('pe-hide-share',      get('hideShare'));
-    document.body.classList.toggle('pe-hide-spotlight',  get('hideSpotlight'));
+    document.body.classList.toggle('pe-hide-comments',   get('hideComments'));
+  }
+
+  // Physically removes the Messages nav button from the DOM (not just hidden with CSS).
+  // A MutationObserver re-removes it whenever Pinterest re-renders the nav (SPA navigation).
+  let _messagesRemoverObs = null;
+  function initMessagesRemover() {
+    if (!get('hideMessages')) return;
+    if (_messagesRemoverObs) return; // already running
+    const SELS = [
+      'div[aria-label="Messages"]',
+      '[data-test-id="nav-bar-speech-ellipsis"]',
+    ];
+    function removeNow(root) {
+      SELS.forEach(sel => {
+        (root.querySelectorAll ? root.querySelectorAll(sel) : []).forEach(el => el.remove());
+      });
+    }
+    removeNow(document);
+    _messagesRemoverObs = new MutationObserver(recs => {
+      if (!get('hideMessages')) { _messagesRemoverObs.disconnect(); _messagesRemoverObs = null; return; }
+      recs.forEach(r => r.addedNodes.forEach(n => { if (n.nodeType === 1) removeNow(n); }));
+    });
+    _messagesRemoverObs.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   // JS-based "Visit site" link removal – catches links that CSS alone misses
@@ -798,6 +826,9 @@
     if (/\bquiz\b/i.test(pin.textContent)) return true;
     // Deleted / unavailable pins
     if (pin.querySelector('[data-test-id="unavailable-pin"]')) return true;
+    // Product cards with price tags (individual Shop the look items)
+    if (pin.querySelector('[data-test-id="product-price-text"]')) return true;
+    if (pin.querySelector('[data-test-id="pincard-product-with-link"]')) return true;
     return false;
   }
 
@@ -851,6 +882,19 @@
     // Pin action bar: "Read it" / "Visit site" inline button on mobile closeup
     document.querySelectorAll('[data-test-id="pin-action-bar-container"]').forEach(el => {
       collapseEl(el.parentElement || el);
+    });
+    // Shop similar / Shop the look sections on pin closeup
+    document.querySelectorAll(
+      '[data-test-id="ShopTheLookSimilarProducts"],' +
+      '[data-test-id="visual-search-shopping-bar"],' +
+      '[data-test-id="related-products"],' +
+      '[data-test-id="ShopTheLookAnnotations"]'
+    ).forEach(el => {
+      collapseEl(el.closest('div[role="listitem"]') || el.parentElement || el);
+    });
+    // Shop the look carousel grid items (full-width shopping module in feed)
+    document.querySelectorAll('[data-test-id="shopping-module"]').forEach(el => {
+      collapseEl(el.closest('div[role="listitem"]') || el.closest('[data-grid-item="true"]') || el.parentElement || el);
     });
   }
 
@@ -947,6 +991,127 @@
   }
 
 
+  // ═══════════════════════════════════════════════════════════════════
+  //  MODULE: HIDE SHOP POSTS (TeePublic, Redbubble, AliExpress, etc.)
+  // ═══════════════════════════════════════════════════════════════════
+  const SHOP_DOMAINS = [
+    'teepublic.com', 'redbubble.com',
+    'aliexpress.com', 'aliexpress.us', 'aliexpress.ru',
+    'amazon.com', 'amazon.co.uk', 'amazon.ca', 'amazon.com.au', 'amazon.de',
+    'etsy.com',
+    'ebay.com', 'ebay.co.uk', 'ebay.ca', 'ebay.com.au',
+  ];
+
+  function isShopPost(pin) {
+    const links = pin.querySelectorAll('a[href]');
+    for (const a of links) {
+      const href = (a.href || '').toLowerCase();
+      if (SHOP_DOMAINS.some(d => href.includes(d))) return true;
+    }
+    const text = (pin.textContent || '').toLowerCase();
+    return ['teepublic', 'redbubble', 'aliexpress', 'amazon', 'etsy', 'ebay'].some(name => text.includes(name));
+  }
+
+  function filterShopPosts(container) {
+    if (!get('hideShopPosts')) return;
+    container.querySelectorAll('div[role="listitem"]').forEach(pin => {
+      if (!pin.__peShopHidden && isShopPost(pin)) {
+        pin.__peShopHidden = true;
+        collapseEl(pin);
+      }
+    });
+  }
+
+  let _hideShopPostsObs = null;
+
+  function initHideShopPosts() {
+    if (!get('hideShopPosts') || _hideShopPostsObs) return;
+
+    function attachListObserver(listEl) {
+      if (listEl.__peShopObs) return;
+      listEl.__peShopObs = true;
+      filterShopPosts(listEl);
+      const onMutate = IS_MOBILE ? debounce(() => filterShopPosts(listEl), 200) : () => filterShopPosts(listEl);
+      new MutationObserver(onMutate)
+        .observe(listEl, { childList: true, subtree: true });
+    }
+
+    document.querySelectorAll('div[role="list"]').forEach(attachListObserver);
+
+    _hideShopPostsObs = new MutationObserver(() => {
+      document.querySelectorAll('div[role="list"]').forEach(attachListObserver);
+    });
+    _hideShopPostsObs.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  MODULE: HIDE COMMENTS
+  // ═══════════════════════════════════════════════════════════════════
+  function hideCommentEditorWrapper() {
+    if (!get('hideComments')) return;
+    // Walk up from the known comment editor container ID to find
+    // its bordered outer wrapper and hide the whole thing
+    ['dweb-comment-editor-container', 'mweb-comment-editor-container'].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      let p = el.parentElement;
+      for (let i = 0; i < 10 && p && p !== document.body; i++) {
+        const style = p.getAttribute('style') || '';
+        if (style.includes('border-color')) {
+          p.style.setProperty('display', 'none', 'important');
+          return;
+        }
+        p = p.parentElement;
+      }
+      el.style.setProperty('display', 'none', 'important');
+    });
+  }
+
+  function initHideComments() {
+    if (!get('hideComments')) return;
+    hideCommentEditorWrapper();
+    new MutationObserver(() => hideCommentEditorWrapper())
+      .observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  MODULE: SCROLL PRESERVATION
+  //  Saves home-feed scroll position when navigating away and restores
+  //  it on browser back (popstate).  Does NOT restore on explicit
+  //  home-link clicks so fresh home navigation always goes to top.
+  // ═══════════════════════════════════════════════════════════════════
+  function initScrollPreservation() {
+    let _homeScrollY = 0;
+    let _homeClickIntent = false;
+
+    // Continuously save scroll Y while on the home feed
+    window.addEventListener('scroll', () => {
+      if (location.pathname === '/') _homeScrollY = window.scrollY;
+    }, { passive: true });
+
+    // When the user explicitly clicks a home nav link, clear saved scroll
+    // so that intentional "go home" always scrolls to top
+    document.addEventListener('click', e => {
+      const homeLink = e.target.closest(
+        'a[href="/"], [data-test-id="home-tab"], [aria-label="Home"]'
+      );
+      if (homeLink) {
+        _homeClickIntent = true;
+        _homeScrollY = 0;
+      }
+    }, true);
+
+    // On browser back/forward (popstate), restore scroll if returning to home
+    window.addEventListener('popstate', () => {
+      if (location.pathname === '/' && _homeScrollY > 0 && !_homeClickIntent) {
+        // Delay so React finishes rendering the feed before we scroll
+        setTimeout(() => window.scrollTo(0, _homeScrollY), 400);
+      }
+      _homeClickIntent = false;
+    });
+  }
 
 
   // ═══════════════════════════════════════════════════════════════════
@@ -1035,6 +1200,20 @@
     ]) {
       const img = document.querySelector(s);
       if (!img) continue;
+
+      // ── GIF detection: check srcset/src for a .gif URL first ──────
+      const gifUrl = getGifSrcFromImg(img);
+      if (gifUrl) return gifUrl;
+      // Also handle mobile GIF closeup: PinTypeIdentifier badge says "GIF"
+      // but the img only has a JPEG src — derive the originals .gif URL
+      if (!gifUrl) {
+        const gifBadge = document.querySelector('[data-test-id="PinTypeIdentifier"]');
+        if (gifBadge && /gif|animated/i.test(gifBadge.textContent)) {
+          const derived = deriveGifUrl(img.currentSrc || img.src);
+          if (derived) return derived;
+        }
+      }
+
       // Prefer srcset – pick highest declared width
       const srcset = img.getAttribute('srcset');
       if (srcset) {
@@ -1069,6 +1248,17 @@
   // Build a descending-quality URL queue for a pinimg.com image.
   // Tries originals first, then 736x, then 564x so we always get *something*
   // even when the /originals/ path is access-restricted for a given pin.
+  // Converts any v1.pinimg.com video URL to the highest reliably available quality.
+  // mc channel → 720p direct MP4; iht channel (Idea Pins) → 720w expMp4.
+  function getHighestQualityVideoUrl(src) {
+    const m = src.match(/v1\.pinimg\.com\/videos\/(mc|iht)\/(?:expMp4|720p|hls)\/([a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{32,})/i);
+    if (!m) return src;
+    const [, channel, hash] = m;
+    return channel === 'iht'
+      ? `https://v1.pinimg.com/videos/iht/expMp4/${hash}_720w.mp4`
+      : `https://v1.pinimg.com/videos/mc/720p/${hash}.mp4`;
+  }
+
   function pinimgFallbackQueue(url) {
     if (!url) return [url];
     const m = url.match(
@@ -1148,7 +1338,7 @@
       'explore','business','login','logout','create','about',
       'help','careers','news','collage-creation-tool',
     ]);
-    const urlMatch = parts.length === 2 && !skip.has(parts[0]) && !skip.has(parts[1]);
+    const urlMatch = parts.length === 2 && !skip.has(parts[0]);
     // DOM confirmation: Pinterest board header is present
     const domMatch = !!document.querySelector(
       '[data-test-id="board-header-with-image"], [data-test-id="board-header-details"], [data-test-id="board-tools"]'
@@ -1181,28 +1371,50 @@
     });
   }
 
+  // Snapshot video pins currently in the DOM into the accumulator.
+  // Called alongside snapshotPinUrls so videos are captured before virtual-list recycling.
+  function snapshotVideoUrls(vidSeen, vidItems) {
+    document.querySelectorAll('video').forEach(vid => {
+      const src = findPinterestVideoSrc(vid);
+      if (!src || /i\.pinimg\.com/.test(src)) return; // skip GIFs
+      const m = src.match(/v1\.pinimg\.com\/videos\/(mc|iht)\/(?:expMp4|720p|hls)\/([a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{32,})/i);
+      if (!m) return;
+      const key = m[1] + '/' + m[2];
+      if (vidSeen.has(key)) return;
+      vidSeen.add(key);
+      const pinScope = vid.closest(
+        '[data-test-id="pinWrapper"], [data-grid-item="true"], [data-test-id="pin"], div[role="listitem"]'
+      );
+      vidItems.push({ channel: m[1], hash: m[2], title: extractPinTitleFromScope(pinScope) });
+    });
+  }
+
   // Scroll to the bottom, snapshotting URLs at each tick so virtualised
   // DOM nodes are captured before they get removed.  Returns accumulated
   // URL array.  Stall threshold is intentionally generous (12 × 900ms =
   // 10.8 s) because Pinterest's lazy load can pause for several seconds.
   async function autoScrollAndCollect(setStatus) {
-    const seen  = new Set();
-    const urls  = [];
-    const names = new Map();
+    const seen     = new Set();
+    const urls     = [];
+    const names    = new Map();
+    const vidSeen  = new Set();
+    const vidItems = [];
     return new Promise(resolve => {
       let lastH = 0, stall = 0;
       const t = setInterval(() => {
-        snapshotPinUrls(seen, urls, names);    // grab current DOM before scroll
+        snapshotPinUrls(seen, urls, names);            // grab current DOM before scroll
+        snapshotVideoUrls(vidSeen, vidItems);
         window.scrollTo(0, document.body.scrollHeight);
         const h = document.body.scrollHeight;
-        setStatus('scroll', urls.length, 0);
+        setStatus('scroll', urls.length + vidItems.length, 0);
         if (h === lastH) {
           stall++;
           if (stall >= 12) {
-            snapshotPinUrls(seen, urls, names); // final grab
+            snapshotPinUrls(seen, urls, names);        // final grab
+            snapshotVideoUrls(vidSeen, vidItems);
             clearInterval(t);
             window.scrollTo(0, 0);
-            resolve({ urls, names });
+            resolve({ urls, names, vidItems });
           }
         } else {
           stall = 0;
@@ -1233,10 +1445,11 @@
     return results;
   }
 
-  // ─── Save all board images as named downloads ───────────────────
+  // ─── Save all board images + videos as named downloads ──────────
   async function downloadBoardFolder(setStatus) {
-    const { urls, names } = await collectAllPins(setStatus);
-    if (!urls.length) { alert('[Pinterest Power Menu] No images found on this board.'); return; }
+    const { urls, names, vidItems } = await collectAllPins(setStatus);
+    const totalItems = urls.length + vidItems.length;
+    if (!totalItems) { alert('[Pinterest Power Menu] No images or videos found on this board.'); return; }
 
     // Use pin title only. If unavailable, use: "Pin - 12345678".
     function makeFileName(url, ext) {
@@ -1246,8 +1459,9 @@
       return `${pinName}${ext}`;
     }
 
-    const bufs = await fetchParallel(urls, 5, (done, total) =>
-      setStatus('fetch', done, total)
+    // ── Download images ───────────────────────────────────────────
+    const bufs = await fetchParallel(urls, 5, (done, _) =>
+      setStatus('fetch', done, totalItems)
     );
 
     let saved = 0;
@@ -1265,44 +1479,76 @@
         await new Promise(r => setTimeout(r, 300));
         saved++;
       } catch (_) {}
+      setStatus('fetch', saved, totalItems);
     }
-    setStatus('done', saved, urls.length);
+
+    // ── Download videos ───────────────────────────────────────────
+    for (const vi of vidItems) {
+      const fallbackUrls = vi.channel === 'mc'
+        ? [
+            `https://v1.pinimg.com/videos/mc/720p/${vi.hash}.mp4`,
+            `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t4.mp4`,
+            `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t3.mp4`,
+            `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t2.mp4`,
+            `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t1.mp4`,
+          ]
+        : [`https://v1.pinimg.com/videos/iht/expMp4/${vi.hash}_720w.mp4`];
+      const title = stripKnownExt(sanitizeFilename(vi.title || '')) || makeFallbackPinName();
+      try {
+        await downloadVideoFile(fallbackUrls, title, null);
+        saved++;
+      } catch (_) {}
+      setStatus('fetch', saved, totalItems);
+    }
+
+    setStatus('done', saved, totalItems);
   }
 
-  // ─── FAB + popup UI ──────────────────────────────────────────────
+  // ─── Board downloader button (lives inside #pe-settings-wrap) ───
   function removeBoardDownloaderUI() {
-    const el = document.getElementById('pe-bd-fab');
-    if (el) el.remove();
+    // Remove button, menu, and any legacy outer wrapper
+    ['pe-bd-btn', 'pe-bd-menu', 'pe-bd-fab'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) { if (el._bdCleanup) el._bdCleanup(); el.remove(); }
+    });
   }
 
   function createBoardDownloaderUI() {
-    removeBoardDownloaderUI();          // always clean up first
+    if (document.getElementById('pe-bd-fab')) return;
     if (!get('boardDownloader') || !isBoardPage()) return;
+    removeBoardDownloaderUI();
 
+    // Standalone fixed container — independent of #pe-settings-wrap to avoid
+    // timing/race issues with the MutationObserver that calls this function.
     const fab = document.createElement('div');
     fab.id = 'pe-bd-fab';
-    fab.innerHTML = `
-      <div id="pe-bd-menu" style="display:none">
-        <div id="pe-bd-status" style="display:none"></div>
-        <button class="pe-bd-opt" id="pe-bd-folder">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 19v2h14v-2H5z"/>
-          </svg>
-          Download All Pins
-        </button>
-      </div>
-      <button id="pe-bd-btn" title="Download Board">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+
+    // Popup menu (appears above the button)
+    const menu = document.createElement('div');
+    menu.id = 'pe-bd-menu';
+    menu.style.display = 'none';
+    menu.innerHTML = `
+      <div id="pe-bd-status" style="display:none"></div>
+      <button class="pe-bd-opt" id="pe-bd-folder">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
           <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 19v2h14v-2H5z"/>
         </svg>
+        Download All
       </button>
     `;
+
+    // Circular board download button
+    const btn = document.createElement('button');
+    btn.id = 'pe-bd-btn';
+    btn.title = 'Download Board';
+    btn.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 19v2h14v-2H5z"/></svg>`;
+
+    fab.appendChild(menu);
+    fab.appendChild(btn);
     document.body.appendChild(fab);
 
-    const btn    = fab.querySelector('#pe-bd-btn');
-    const menu   = fab.querySelector('#pe-bd-menu');
-    const status = fab.querySelector('#pe-bd-status');
-    const dirBtn = fab.querySelector('#pe-bd-folder');
+    const status = menu.querySelector('#pe-bd-status');
+    const dirBtn = menu.querySelector('#pe-bd-folder');
 
     let menuOpen = false;
     function toggleMenu() {
@@ -1310,9 +1556,13 @@
       menu.style.display = menuOpen ? 'block' : 'none';
     }
     btn.addEventListener('click', e => { e.stopPropagation(); toggleMenu(); });
-    document.addEventListener('click', e => {
+
+    function onOutsideClick(e) {
       if (menuOpen && !fab.contains(e.target)) { menuOpen = false; menu.style.display = 'none'; }
-    });
+    }
+    document.addEventListener('click', onOutsideClick);
+    // Store cleanup on fab so removeBoardDownloaderUI can detach the listener
+    fab._bdCleanup = () => document.removeEventListener('click', onOutsideClick);
 
     function setStatus(phase, a, b) {
       if (phase === 'cancelled') {
@@ -1321,8 +1571,8 @@
         return;
       }
       status.style.display = 'block';
-      if (phase === 'scroll')  status.textContent = `Scrolling… ${a} pins loaded`;
-      else if (phase === 'fetch') status.textContent = `Fetching ${a}/${b} (${b ? Math.round(a/b*100) : 0}%)`;
+      if (phase === 'scroll')      status.textContent = `Scrolling… ${a} items found`;
+      else if (phase === 'fetch')  status.textContent = `Saving ${a}/${b} (${b ? Math.round(a/b*100) : 0}%)`;
       else if (phase === 'done') {
         status.textContent = `✓ Done – ${a} files saved`;
         setTimeout(() => {
@@ -1341,11 +1591,174 @@
 
 
   // ═══════════════════════════════════════════════════════════════════
+  //  MODULE: VIDEO DOWNLOADER FAB
+  //  Shows a download button in the widget stack on pin closeup pages.
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Find the best downloadable video URL from a <video> element.
+  // Checks all <source> elements and attributes; prefers direct MP4 over HLS.
+  function findPinterestVideoSrc(vid) {
+    const candidates = [];
+    // Collect all <source> src attrs first (more reliable than currentSrc when HLS.js is active)
+    vid.querySelectorAll('source').forEach(s => {
+      const u = s.getAttribute('src') || s.getAttribute('data-src') || '';
+      if (u) candidates.push(u);
+    });
+    // Then currentSrc / src attributes
+    candidates.push(vid.currentSrc || '', vid.getAttribute('src') || '', vid.getAttribute('data-src') || '');
+    // Prefer direct v1.pinimg.com MP4 (non-m3u8)
+    for (const u of candidates) {
+      if (/v1\.pinimg\.com\/videos/.test(u) && !/\.m3u8/.test(u)) return u;
+    }
+    // Fall back to any v1.pinimg.com URL (incl. HLS, so we can still extract hash)
+    for (const u of candidates) {
+      if (/v1\.pinimg\.com\/videos/.test(u)) return u;
+    }
+    return null;
+  }
+
+  // Download a video file with progress feedback.
+  // Tries urls in order, stopping at first success or non-404 failure.
+  function downloadVideoFile(urls, filename, onProgress) {
+    return new Promise((resolve, reject) => {
+      let idx = 0;
+      function tryNext() {
+        if (idx >= urls.length) { reject(new Error('all URLs failed')); return; }
+        const url = urls[idx++];
+        GM_xmlhttpRequest({
+          method: 'GET', url, responseType: 'arraybuffer',
+          headers: { 'Referer': location.href, 'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8' },
+          onprogress: e => { if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total); },
+          onload: r => {
+            if (r.status >= 200 && r.status < 300) {
+              const base = stripKnownExt(sanitizeFilename(filename || '')) || makeFallbackPinName();
+              const blob = new Blob([r.response], { type: 'video/mp4' });
+              const a    = document.createElement('a');
+              a.href     = URL.createObjectURL(blob);
+              a.download = base + '.mp4';
+              a.click();
+              setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+              resolve();
+            } else if (r.status === 404) {
+              tryNext(); // try next URL in the fallback chain
+            } else {
+              reject(new Error('HTTP ' + r.status));
+            }
+          },
+          onerror: () => reject(new Error('network error')),
+        });
+      }
+      tryNext();
+    });
+  }
+
+  function removeVideoDlFab() {
+    const el = document.getElementById('pe-vid-dl-fab');
+    if (el) el.remove();
+  }
+
+  function createVideoDlFab() {
+    removeVideoDlFab();
+    if (!get('videoDownloader')) return;
+    // Only show on pin closeup pages — not on the home feed or boards
+    if (!/\/pin\/\d/i.test(location.pathname)) return;
+
+    // Try specific closeup container selectors first
+    let vid = document.querySelector(
+      '[data-test-id="pin-closeup-image"] video, ' +
+      '[data-test-id="duplo-hls-video"] video, ' +
+      '[data-test-id="pinrep-video"] video, ' +
+      '[data-test-id="closeup-expanded-view"] video, ' +
+      '[data-test-id="closeup-image"] video'
+    );
+    // Fallback: any video on the pin page that resolves to a Pinterest video CDN URL
+    if (!vid) {
+      for (const v of document.querySelectorAll('video')) {
+        const s = findPinterestVideoSrc(v);
+        if (s && !/i\.pinimg\.com/.test(s)) { vid = v; break; }
+      }
+    }
+    // Get URL: DOM-based first, then intercepted XHR fallback (desktop HLS.js blob: src)
+    let rawSrc = vid ? findPinterestVideoSrc(vid) : null;
+    if (!rawSrc && _interceptedVideoUrls.length) rawSrc = _interceptedVideoUrls[0];
+
+    // No URL available yet — watch video elements and retry when src changes or media loads
+    if (!rawSrc) {
+      const toWatch = vid ? [vid] : [...document.querySelectorAll('video')];
+      toWatch.forEach(v => {
+        if (v.__peVidDlWatch || /i\.pinimg\.com/.test(getVideoSrc(v))) return;
+        v.__peVidDlWatch = true;
+        const retry = () => {
+          if (document.getElementById('pe-vid-dl-fab') || !/\/pin\/\d/i.test(location.pathname)) return;
+          v.__peVidDlWatch = false;
+          createVideoDlFab();
+        };
+        new MutationObserver(retry).observe(v, {
+          attributes: true, attributeFilter: ['src'],
+          childList: true, subtree: true,
+        });
+        v.addEventListener('loadedmetadata', retry, { once: true });
+        v.addEventListener('canplay',        retry, { once: true });
+      });
+      return;
+    }
+
+    if (/i\.pinimg\.com/.test(rawSrc)) return; // GIF pin — no video download button
+
+    const wrap = document.getElementById('pe-settings-wrap');
+    if (!wrap) return;
+
+    // Build fallback URL list: 720p → t4 → t3 → t2 → t1
+    const bestUrl = getHighestQualityVideoUrl(rawSrc);
+    const m = rawSrc.match(/v1\.pinimg\.com\/videos\/(mc|iht)\/(?:expMp4|720p|hls)\/([a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{32,})/i);
+    const fallbackUrls = m && m[1] === 'mc'
+      ? [
+          `https://v1.pinimg.com/videos/mc/720p/${m[2]}.mp4`,
+          `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t4.mp4`,
+          `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t3.mp4`,
+          `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t2.mp4`,
+          `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t1.mp4`,
+        ].filter((u, i, a) => a.indexOf(u) === i)
+      : [bestUrl];
+
+    const btn = document.createElement('button');
+    btn.id    = 'pe-vid-dl-fab';
+    btn.title = 'Download Video';
+    // Simple downward arrow icon
+    btn.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8z"/></svg>`;
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      try {
+        await downloadVideoFile(fallbackUrls, extractPinTitle(), (loaded, total) => {
+          if (total > 0) btn.title = `${Math.round(loaded / total * 100)}%`;
+        });
+      } catch (_) {}
+      btn.disabled = false;
+      btn.title = 'Download Video';
+    });
+    wrap.insertBefore(btn, document.getElementById('pe-settings-btn'));
+  }
+
+  function initVideoDownloader() {
+    if (!get('videoDownloader')) return;
+    createVideoDlFab();
+  }
+
+  // When the XHR interceptor captures a video URL, try to create the fab immediately
+  // (handles desktop HLS.js where no DOM mutations fire after the URL is fetched)
+  _onVideoUrlCapture = function () {
+    if (!get('videoDownloader') || !/\/pin\/\d/i.test(location.pathname)) return;
+    if (document.getElementById('pe-vid-dl-fab')) return;
+    setTimeout(createVideoDlFab, 50);
+  };
+
+
+  // ═══════════════════════════════════════════════════════════════════
   //  SETTINGS PANEL UI  –  circle gear FAB, popup above it
   // ═══════════════════════════════════════════════════════════════════
   const FEATURES = [
     { key: 'originalQuality', label: 'Original Quality',       desc: 'Full-res images instead of thumbnails',                    reload: true  },
-    { key: 'noRegistration',  label: 'No Registration Wall',   desc: 'Auto-remove login / signup popups',                        reload: false },
     { key: 'downloadFixer',   label: 'Download Fixer',         desc: 'Proper filenames & format detection',                      reload: true  },
     { key: 'gifHover',        label: 'GIF Hover Play',         desc: 'GIFs play on hover, pause on leave',                       reload: false },
     { key: 'gifAutoPlay',     label: 'Auto-Play Visible GIFs', desc: 'Auto-play all GIFs on screen, stop when scrolled away',    reload: false },
@@ -1353,14 +1766,16 @@
     { key: 'declutter',       label: 'Declutter',              desc: 'Remove ads, quizzes, sponsored & shopping pins',           reload: false },
     { key: 'removeVideos',    label: 'Remove Videos',          desc: 'Remove all video pins from the feed',                      reload: false },
     { key: 'contextMenu',     label: 'Image Context Menu',     desc: 'Right-click pins to copy, open or save the original',      reload: false },
+    { key: 'videoDownloader', label: 'Video Downloader',       desc: 'Download button on video pins — saves at 720p quality',     reload: false },
   ];
 
   const HIDE_FEATURES = [
     { key: 'hideVisitSite',  label: 'Hide Visit Site',          desc: 'Remove all "Visit site" buttons',                         reload: false },
     { key: 'hideUpdates',    label: 'Hide Updates Bell',        desc: 'Hide the Updates / notifications button',                 reload: false },
-    { key: 'hideMessages',   label: 'Hide Messages Button',     desc: 'Hide the Messages chat button in the nav',                reload: false },
+    { key: 'hideMessages',   label: 'Hide Messages Button',     desc: 'Hide the Messages / notifications button in the nav',     reload: false },
     { key: 'hideShare',      label: 'Hide Share Button',        desc: 'Hide the Share / Send button on pins',                    reload: false },
-    { key: 'hideSpotlight',  label: 'Hide Curated Spotlights',  desc: 'Hide Pinterest editorial & curated content tiles',        reload: false },
+    { key: 'hideShopPosts',  label: 'Hide Shop Posts',          desc: 'Collapse pins from shops (Amazon, Etsy, eBay, TeePublic, Redbubble, AliExpress)', reload: false },
+    { key: 'hideComments',   label: 'Hide Comments',            desc: 'Hide comment sections and comment input on pins',         reload: false },
   ];
 
   function createSettingsPanel() {
@@ -1446,13 +1861,16 @@
         const key = cb.dataset.key;
         set(key, cb.checked);
         if (key === 'hideVisitSite') applyVisitSiteToggle();
-        if (key === 'noRegistration' && cb.checked) removeModals();
         if (key === 'gifHover') { pauseActiveGif(); document.querySelectorAll('video').forEach(pauseVidOnAdd); }
         if (key === 'gifAutoPlay') { if (cb.checked) initGifAutoPlay(); else stopGifAutoPlay(); }
         if (key === 'declutter') { if (cb.checked) initDeclutter(); }
         if (key === 'removeVideos') { if (cb.checked) initRemoveVideos(); }
         if (key === 'contextMenu') { if (cb.checked) initImageContextMenu(); }
-        if (key === 'hideUpdates' || key === 'hideMessages' || key === 'hideShare' || key === 'hideSpotlight') applyNavToggles();
+        if (key === 'hideUpdates' || key === 'hideMessages' || key === 'hideShare') applyNavToggles();
+        if (key === 'hideMessages' && cb.checked) initMessagesRemover();
+        if (key === 'hideShopPosts') { if (cb.checked) initHideShopPosts(); }
+        if (key === 'hideComments') { applyNavToggles(); if (cb.checked) initHideComments(); }
+        if (key === 'videoDownloader') { if (cb.checked) createVideoDlFab(); else removeVideoDlFab(); }
         if (cb.dataset.reload === 'true')
           wrap.querySelector('#pe-notice').style.display = 'flex';
       });
@@ -1495,7 +1913,7 @@
         const vid = wrap.querySelector('video');
         if (vid) {
           const src = vid.src || (vid.querySelector('source') && vid.querySelector('source').src);
-          if (src && !/i\.pinimg\.com/.test(src)) return { url: src, type: 'video', title };
+          if (src && !/i\.pinimg\.com/.test(src)) return { url: getHighestQualityVideoUrl(src), type: 'video', title };
         }
       }
 
@@ -1507,7 +1925,7 @@
         }
         img = img.parentElement;
       }
-
+      
       if (!img || img.tagName !== 'IMG' || !/pinimg\.com/i.test(img.src)) {
         if (wrap) {
            img = wrap.querySelector('img[src*="pinimg.com"]');
@@ -1525,7 +1943,7 @@
       if (/\.gif(\?|$)/i.test(img.src)) {
         return { url: img.src, type: 'gif', title };
       }
-
+      
       // 2. Does it have a GIF in its original srcset?
       const origSrcset = img.__peAutoOrigSrcset || img.getAttribute('srcset') || '';
       for (const part of origSrcset.split(',')) {
@@ -1560,7 +1978,7 @@
       }
 
       if (type === 'video' || type === 'gif') {
-        // We cannot reliably put video or animated gif binaries into the OS clipboard
+        // We cannot reliably put video or animated gif binaries into the OS clipboard 
         // without causing bugs like Discord pasting "message.txt".
         // Instead, copy the direct URL so it auto-embeds natively.
         fallbackToText();
@@ -1852,6 +2270,9 @@
     const s = document.createElement('style');
     s.id = 'pe-styles';
     s.textContent = `
+      /* ──────── Always hide "Open app" search autocomplete suggestions ──────── */
+      [data-test-type="app_upsell_autocomplete"] { display: none !important; }
+
       /* ──────── Hide Visit Site ──────── */
       body.pe-hide-visit [data-test-id="visit-button"],
       body.pe-hide-visit .domain-link-button,
@@ -1867,7 +2288,9 @@
 
       /* ──────── Hide Messages nav button ──────── */
       body.pe-hide-messages div[aria-label="Messages"],
-      body.pe-hide-messages [data-test-id="notifications-button"] {
+      body.pe-hide-messages [data-test-id="notifications-button"],
+      body.pe-hide-messages [data-test-id="nav-bar-speech-ellipsis"],
+      body.pe-hide-messages a[href="/notifications/"] {
         display: none !important;
       }
 
@@ -1882,8 +2305,13 @@
         display: none !important;
       }
 
-      /* ──────── Hide Curated Spotlights ──────── */
-      body.pe-hide-spotlight [data-test-id="search-story-suggestions-container"]:has([data-test-id="search-suggestion-curated-board-bubble"]) {
+      /* ──────── Hide Comments ──────── */
+      body.pe-hide-comments #canonical-card,
+      body.pe-hide-comments [data-test-id="comment-editor-container"],
+      body.pe-hide-comments [data-test-id="editor-with-mentions"],
+      body.pe-hide-comments #dweb-comment-editor-container,
+      body.pe-hide-comments #mweb-comment-editor-container,
+      body.pe-hide-comments [data-test-id="closeup-metadata-details-divider"] {
         display: none !important;
       }
 
@@ -2043,17 +2471,18 @@
       }
       #pe-reload-btn:hover { background: #b5001b; }
 
-      /* ──────── Board Downloader FAB ──────── */
+      /* ──────── Board Downloader FAB (standalone, above #pe-settings-wrap) ──────── */
       #pe-bd-fab {
         position: fixed;
-        bottom: 54px;
+        bottom: 56px;
         right: 6px;
-        z-index: 2147483646;
+        z-index: 2147483647;
         display: flex;
         flex-direction: column;
         align-items: flex-end;
-        gap: 8px;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        gap: 10px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        user-select: none;
       }
       #pe-bd-btn {
         width: 40px; height: 40px;
@@ -2064,6 +2493,7 @@
         box-shadow: 0 4px 18px rgba(230,0,35,.45);
         transition: background .18s, box-shadow .18s, transform .12s;
         flex-shrink: 0;
+        touch-action: manipulation;
       }
       #pe-bd-btn:hover {
         background: #b5001b;
@@ -2071,6 +2501,23 @@
         transform: scale(1.08);
       }
       #pe-bd-btn:active { transform: scale(.92); }
+
+      /* ──────── Video Downloader FAB ──────── */
+      #pe-vid-dl-fab {
+        width: 40px; height: 40px;
+        border-radius: 50%;
+        background: #e60023; color: #fff; border: none;
+        cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        box-shadow: 0 4px 18px rgba(230,0,35,.45);
+        transition: background .18s, box-shadow .18s, transform .25s;
+        flex-shrink: 0;
+        touch-action: manipulation;
+      }
+      #pe-vid-dl-fab:hover  { background: #b5001b; box-shadow: 0 6px 24px rgba(230,0,35,.55); transform: scale(1.08); }
+      #pe-vid-dl-fab:active { transform: scale(.92); }
+      #pe-vid-dl-fab:disabled { opacity: .55; cursor: wait; transform: none !important; }
+
       #pe-bd-menu {
         background: #fff;
         border-radius: 12px;
@@ -2161,15 +2608,19 @@
         /* Slightly smaller FABs on touch so they don't obscure pins */
         #pe-settings-btn { width: 32px; height: 32px; }
         #pe-bd-btn        { width: 32px; height: 32px; }
+        /* Adjust board fab bottom: 32px (mobile settings btn) + 6px + 10px gap = 48px */
+        #pe-bd-fab        { bottom: 48px; }
 
         /* ── Compact settings panel on mobile ── */
         /* Cap height to ~62% of screen and use a narrower width */
         #pe-settings-panel {
+          max-height: 420px; /* px fallback for browsers without dvh support */
           max-height: min(62dvh, 420px);
           min-width: 220px;
           max-width: calc(100vw - 14px);
           border-radius: 12px;
         }
+        #pe-vid-dl-fab { width: 32px; height: 32px; }
         /* Smaller title bar */
         #pe-settings-title {
           font-size: 13px;
@@ -2212,6 +2663,17 @@
       }
 
       /* Prevent panels exceeding viewport width on very narrow screens */
+      /* Backup compact panel for narrow screens where pointer:coarse may not fire */
+      @media (max-width: 600px) {
+        #pe-settings-panel {
+          max-height: 420px;
+          max-height: min(62dvh, 420px);
+          min-width: 220px;
+          max-width: calc(100vw - 14px);
+        }
+        #pe-vid-dl-fab { width: 32px; height: 32px; }
+      }
+
       @media (max-width: 320px) {
         #pe-settings-panel { min-width: unset; width: calc(100vw - 12px); }
         #pe-ctx-menu       { min-width: unset; width: calc(100vw - 24px); }
@@ -2246,9 +2708,6 @@
     if (get('originalQuality'))
       document.querySelectorAll('img[src*="pinimg.com"]').forEach(upgradeImg);
 
-    // Remove any modals already in DOM
-    removeModals();
-
     // GIF hover – pause any videos already in DOM, start delegation
     document.querySelectorAll('video').forEach(pauseVidOnAdd);
     initGifHover();
@@ -2257,6 +2716,7 @@
     applyVisitSiteToggle();
     applyNavToggles();
     initVisitSiteHider();
+    initMessagesRemover();
     initShareOverride();
 
     // Declutter
@@ -2274,11 +2734,23 @@
     // Download fixer event listener
     initDownloadFixer();
 
+    // Settings panel
+    createSettingsPanel();
+
     // Board downloader button
     createBoardDownloaderUI();
 
-    // Settings panel
-    createSettingsPanel();
+    // Hide shop posts
+    initHideShopPosts();
+
+    // Hide comments
+    initHideComments();
+
+    // Video downloader FAB
+    initVideoDownloader();
+
+    // Scroll preservation (restores position on browser back)
+    initScrollPreservation();
 
     // Mobile: pre-load lazy images and fix GIF loading
     initMobileLazyFix();
@@ -2307,12 +2779,16 @@
       setTimeout(() => {
         removeBoardDownloaderUI();
         if (get('boardDownloader') && isBoardPage()) createBoardDownloaderUI();
+        removeVideoDlFab();
+        if (get('videoDownloader')) createVideoDlFab();
       }, 600);
 
       // Second attempt after a longer delay in case lazy-loaded DOM is slow
       setTimeout(() => {
-        if (!document.getElementById('pe-bd-fab') && get('boardDownloader') && isBoardPage())
+        if (!document.getElementById('pe-bd-btn') && get('boardDownloader') && isBoardPage())
           createBoardDownloaderUI();
+        if (!document.getElementById('pe-vid-dl-fab') && get('videoDownloader'))
+          createVideoDlFab();
       }, 1800);
     }
 
@@ -2323,11 +2799,13 @@
     history.replaceState = function (...a) { _replace(...a); onNavigate(); };
     window.addEventListener('popstate', onNavigate);
 
-    // Also watch for the board header appearing in the DOM (handles cases
-    // where the URL change fires before React has rendered the board)
+    // Also watch for the board header / video element appearing in the DOM (handles cases
+    // where the URL change fires before React has rendered the new page content)
     new MutationObserver(() => {
-      if (document.getElementById('pe-bd-fab')) return;   // already present
-      if (get('boardDownloader') && isBoardPage()) createBoardDownloaderUI();
+      if (!document.getElementById('pe-bd-btn') && get('boardDownloader') && isBoardPage())
+        createBoardDownloaderUI();
+      if (!document.getElementById('pe-vid-dl-fab') && get('videoDownloader'))
+        createVideoDlFab();
     }).observe(document.documentElement, { childList: true, subtree: true });
   })();
 

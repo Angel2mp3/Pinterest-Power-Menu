@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
 // @namespace    https://github.com/Angel2mp3
-// @version      1.3.0
+// @version      1.3.1
 // @description  All-in-one Pinterest power tool: original quality, download fixer, video downloader, board folder downloader, GIF hover/auto-play, remove videos, hide Visit Site, declutter, hide UI elements, hide shop posts, hide comments, scroll preservation
 // @author       Angel2mp3
 // @icon         https://www.pinterest.com/favicon.ico
@@ -1618,7 +1618,8 @@
   }
 
   // Download a video file with progress feedback.
-  // Tries urls in order, stopping at first success or non-404 failure.
+  // Tries every URL in order; on any error (network, timeout, or non-2xx) moves to the next.
+  // Mobile uses responseType:'blob' (streamed to disk) to avoid loading the whole file into RAM.
   function downloadVideoFile(urls, filename, onProgress) {
     return new Promise((resolve, reject) => {
       let idx = 0;
@@ -1626,26 +1627,28 @@
         if (idx >= urls.length) { reject(new Error('all URLs failed')); return; }
         const url = urls[idx++];
         GM_xmlhttpRequest({
-          method: 'GET', url, responseType: 'arraybuffer',
+          method: 'GET', url,
+          responseType: IS_MOBILE ? 'blob' : 'arraybuffer',
+          timeout: 300000, // 5-minute cap; prevents silent hangs on slow mobile connections
           headers: { 'Referer': location.href, 'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8' },
           onprogress: e => { if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total); },
           onload: r => {
             if (r.status >= 200 && r.status < 300) {
               const base = stripKnownExt(sanitizeFilename(filename || '')) || makeFallbackPinName();
-              const blob = new Blob([r.response], { type: 'video/mp4' });
+              const blob = IS_MOBILE ? r.response : new Blob([r.response], { type: 'video/mp4' });
               const a    = document.createElement('a');
               a.href     = URL.createObjectURL(blob);
               a.download = base + '.mp4';
+              document.body.appendChild(a);
               a.click();
-              setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+              setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
               resolve();
-            } else if (r.status === 404) {
-              tryNext(); // try next URL in the fallback chain
             } else {
-              reject(new Error('HTTP ' + r.status));
+              tryNext();
             }
           },
-          onerror: () => reject(new Error('network error')),
+          onerror:   tryNext,
+          ontimeout: tryNext,
         });
       }
       tryNext();
@@ -1708,17 +1711,26 @@
     const wrap = document.getElementById('pe-settings-wrap');
     if (!wrap) return;
 
-    // Build fallback URL list: 720p → t4 → t3 → t2 → t1
+    // Build fallback URL list. Desktop: highest quality first. Mobile: lowest first (smaller file = less RAM).
     const bestUrl = getHighestQualityVideoUrl(rawSrc);
     const m = rawSrc.match(/v1\.pinimg\.com\/videos\/(mc|iht)\/(?:expMp4|720p|hls)\/([a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{32,})/i);
     const fallbackUrls = m && m[1] === 'mc'
-      ? [
-          `https://v1.pinimg.com/videos/mc/720p/${m[2]}.mp4`,
-          `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t4.mp4`,
-          `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t3.mp4`,
-          `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t2.mp4`,
-          `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t1.mp4`,
-        ].filter((u, i, a) => a.indexOf(u) === i)
+      ? (IS_MOBILE
+          ? [
+              `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t1.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t2.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t3.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t4.mp4`,
+              `https://v1.pinimg.com/videos/mc/720p/${m[2]}.mp4`,
+            ]
+          : [
+              `https://v1.pinimg.com/videos/mc/720p/${m[2]}.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t4.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t3.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t2.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t1.mp4`,
+            ]
+        ).filter((u, i, a) => a.indexOf(u) === i)
       : [bestUrl];
 
     const btn = document.createElement('button');

@@ -6,7 +6,7 @@
 
 **The all-in-one Pinterest userscript that makes Pinterest actually good.**
 
-[![Version](https://img.shields.io/badge/Version-1.3.0-red?style=flat-square)](https://github.com/Angel2mp3)
+[![Version](https://img.shields.io/badge/Version-1.3.1-red?style=flat-square)](https://github.com/Angel2mp3)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![FMHY](https://img.shields.io/badge/Featured%20on-FMHY-purple?style=flat-square)](https://fmhy.net/social-media-tools#social-media-tools)
 

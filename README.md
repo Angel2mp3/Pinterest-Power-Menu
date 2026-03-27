@@ -6,7 +6,7 @@
 
 **The all-in-one Pinterest userscript that makes Pinterest actually good.**
 
-[![Version](https://img.shields.io/badge/Version-1.2.1-red?style=flat-square)](https://github.com/Angel2mp3)
+[![Version](https://img.shields.io/badge/Version-1.3.0-red?style=flat-square)](https://github.com/Angel2mp3)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![FMHY](https://img.shields.io/badge/Featured%20on-FMHY-purple?style=flat-square)](https://fmhy.net/social-media-tools#social-media-tools)
 
@@ -27,6 +27,7 @@
 ---
 
 ## ✨ Features
+#### Most of these features are supported for the mobile website version!
 
 ### 🖼️ Original Quality Images
 Pinterest serves downscaled thumbnails by default. This script silently rewrites every image URL to load the **full original resolution** from Pinterest's CDN — no popups, no loading delays. Falls back to high-res (`736x`) if the original isn't available.
@@ -48,6 +49,9 @@ GIFs in the feed are shown as static thumbnails by default. Hover over any pin c
 ### ▶️ Auto-Play Visible GIFs
 Optionally auto-play every GIF currently visible in the viewport. GIFs pause automatically when scrolled out of view to save CPU and memory.
 
+### 📹 Video Downloader (NEW)
+Adds a download button on video pin closeup pages. Downloads the video at original **720p quality** directly from Pinterest's CDN — works on both desktop and mobile. Handles Pinterest's HLS streaming format automatically.
+
 ### 🎬 Remove Videos
 Collapses video pins from your feed while **leaving GIFs untouched**. Detects real video pins via Pinterest's CDN (`v.pinimg.com`) so animated GIFs (served from `i.pinimg.com`) are never wrongly removed.
 
@@ -64,6 +68,8 @@ Removes noise from your feed without leaving blank gaps in the grid:
 - Download upsell popovers
 - Explore tab notification badges
 - Unavailable / Removed pins
+- Shop Similar / Shop the Look sections on pin closeups
+- Curated spotlight carousels on search pages
 
 ### 🙈 Hide UI Elements *(collapsible group)*
 Individual toggles for UI elements you might not want:
@@ -74,28 +80,8 @@ Individual toggles for UI elements you might not want:
 | **Hide Updates Bell** | The notifications/updates bell in the nav |
 | **Hide Messages Button** | The Messages / chat button in the nav |
 | **Hide Share Button** | The Share / Send button on pin closeups |
-| **Hide Currated Spotlights** | Hides all of those mainly from the search page |
-
-### 🚫 No Registration Required (Needs Fixing)
-Attempts to auto-remove all login/signup modals the moment they appear so you can browse freely without an account.
-
----
-
-## 📱 Mobile Support
-
-The script runs on Pinterest's mobile web inside mobile browsers that support userscript managers (e.g. **Firefox for Android + Violentmonkey**, **Safari on iOS + Userscripts app**, **Kiwi Browser + Tampermonkey**).
-
-| Feature | Mobile |
-|---|---|
-| Original Quality Images | ✅ Works |
-| No Registration Wall | ✅ Works |
-| Download Fixer | ✅ Works |
-| Board Downloader | ✅ Works |
-| **GIF Hover Play** | ➖ Desktop only — hover requires a mouse. Toggle it off and use Auto-Play instead. |
-| **Auto-Play Visible GIFs** | ✅ Works |
-| Remove Videos | ✅ Works |
-| Declutter | ✅ Works |
-| Hide UI Elements | ➖ Not all of them may work |
+| **Hide Shop Posts** | Collapses pins linking to Amazon, Etsy, eBay, TeePublic, Redbubble, AliExpress |
+| **Hide Comments** | Hides comment sections and the comment input box on pins |
 
 ---
 
@@ -115,9 +101,6 @@ The script runs on Pinterest's mobile web inside mobile browsers that support us
 ## ⚙️ Settings
 
 Click the **⚙️ gear button** in the bottom-right of any Pinterest page to open the settings panel. Every feature can be toggled individually and is saved automatically. No page reload needed for most options.
-
-
-</details>
 
 ---
 

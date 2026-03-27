@@ -32,8 +32,8 @@
 ### 🖼️ Original Quality Images
 Pinterest serves downscaled thumbnails by default. This script silently rewrites every image URL to load the **full original resolution** from Pinterest's CDN — no popups, no loading delays. Falls back to high-res (`736x`) if the original isn't available.
 
-### 💾 Download Fixer
-Intercepts Pinterest's download button and replaces the low-quality compressed version with the **actual original-quality file**. Detects the correct file format (PNG, JPEG, GIF, WebP) from the binary header and names the file properly.
+### 📹 Video Downloader (NEW)
+Adds a download button on video pin closeup pages. Downloads the video at original **720p quality** directly from Pinterest's CDN — works on both desktop and mobile. Handles Pinterest's HLS streaming format automatically.
 
 ### 🗂️ Board Downloader
 Adds a download button on board pages. Click it to download **all images from the current board**:
@@ -43,14 +43,14 @@ Adds a download button on board pages. Click it to download **all images from th
 - Names each file as the **Pin Title** when available
 - Falls back to **Pin - 12345678** when a title is unavailable
 
-### 🎞️ GIF Hover Play
-GIFs in the feed are shown as static thumbnails by default. Hover over any pin containing a GIF to **play it live**, and it pauses the moment you move away. Only one GIF plays at a time.
+### 💾 Download Fixer
+Intercepts Pinterest's download button and replaces the low-quality compressed version with the **actual original-quality file**. Detects the correct file format (PNG, JPEG, GIF, WebP) from the binary header and names the file properly.
 
 ### ▶️ Auto-Play Visible GIFs
 Optionally auto-play every GIF currently visible in the viewport. GIFs pause automatically when scrolled out of view to save CPU and memory.
 
-### 📹 Video Downloader (NEW)
-Adds a download button on video pin closeup pages. Downloads the video at original **720p quality** directly from Pinterest's CDN — works on both desktop and mobile. Handles Pinterest's HLS streaming format automatically.
+### 🎞️ GIF Hover Play
+GIFs in the feed are shown as static thumbnails by default. Hover over any pin containing a GIF to **play it live**, and it pauses the moment you move away. Only one GIF plays at a time.
 
 ### 🎬 Remove Videos
 Collapses video pins from your feed while **leaving GIFs untouched**. Detects real video pins via Pinterest's CDN (`v.pinimg.com`) so animated GIFs (served from `i.pinimg.com`) are never wrongly removed.

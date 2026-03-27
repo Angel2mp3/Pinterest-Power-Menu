@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
 // @namespace    https://github.com/Angel2mp3
-// @version      1.3.2
+// @version      1.3.3
 // @description  All-in-one Pinterest power tool: original quality, download fixer, video downloader, board folder downloader, GIF hover/auto-play, remove videos, hide Visit Site, declutter, hide UI elements, hide shop posts, hide comments, scroll preservation
 // @author       Angel2mp3
 // @icon         https://www.pinterest.com/favicon.ico
@@ -1742,6 +1742,8 @@
 
     // Build fallback URL list. Desktop: highest quality first. Mobile: lowest first (smaller file = less RAM).
     const bestUrl = getHighestQualityVideoUrl(rawSrc);
+    // Never include HLS playlist URLs — they're text manifests, not downloadable video files
+    const safeRawSrc = rawSrc && !/\.m3u8/i.test(rawSrc) ? rawSrc : null;
     const m = rawSrc.match(/v1\.pinimg\.com\/videos\/(mc|iht)\/(?:expMp4|720p|hls)\/([a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{32,})/i);
     const fallbackUrls = m && m[1] === 'mc'
       ? (IS_MOBILE
@@ -1751,7 +1753,7 @@
               `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t3.mp4`,
               `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t4.mp4`,
               `https://v1.pinimg.com/videos/mc/720p/${m[2]}.mp4`,
-              rawSrc,
+              safeRawSrc,
             ]
           : [
               `https://v1.pinimg.com/videos/mc/720p/${m[2]}.mp4`,
@@ -1759,10 +1761,10 @@
               `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t3.mp4`,
               `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t2.mp4`,
               `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t1.mp4`,
-              rawSrc,
+              safeRawSrc,
             ]
         ).filter((u, i, a) => u && a.indexOf(u) === i)
-      : [bestUrl, rawSrc].filter((u, i, a) => u && a.indexOf(u) === i);
+      : [bestUrl, safeRawSrc].filter((u, i, a) => u && a.indexOf(u) === i);
 
     const btn = document.createElement('button');
     btn.id    = 'pe-vid-dl-fab';
@@ -2830,6 +2832,10 @@
       const newPath = location.pathname;
       if (newPath === _lastPath) return;
       _lastPath = newPath;
+
+      // Clear stale intercepted video URLs from the previous pin so they
+      // can't be picked up by createVideoDlFab on the new pin page
+      _interceptedVideoUrls.length = 0;
 
       // Give Pinterest's React a moment to render the new page
       setTimeout(() => {

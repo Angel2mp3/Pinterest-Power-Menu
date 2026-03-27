@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
 // @namespace    https://github.com/Angel2mp3
-// @version      1.3.1
+// @version      1.3.2
 // @description  All-in-one Pinterest power tool: original quality, download fixer, video downloader, board folder downloader, GIF hover/auto-play, remove videos, hide Visit Site, declutter, hide UI elements, hide shop posts, hide comments, scroll preservation
 // @author       Angel2mp3
 // @icon         https://www.pinterest.com/favicon.ico
@@ -1066,6 +1066,17 @@
       }
       el.style.setProperty('display', 'none', 'important');
     });
+    // Hide mobile comment preview ("View all comments" text + snippet above it)
+    document.querySelectorAll('div,span,a').forEach(el => {
+      if (!el.children.length && /^view all comments$/i.test(el.textContent.trim())) {
+        const container = el.parentElement && el.parentElement.parentElement;
+        if (container && container !== document.body) {
+          container.style.setProperty('display', 'none', 'important');
+        } else if (el.parentElement) {
+          el.parentElement.style.setProperty('display', 'none', 'important');
+        }
+      }
+    });
   }
 
   function initHideComments() {
@@ -1626,30 +1637,48 @@
       function tryNext() {
         if (idx >= urls.length) { reject(new Error('all URLs failed')); return; }
         const url = urls[idx++];
-        GM_xmlhttpRequest({
+        // settled + timer prevent double-calls when abort races with onerror/ontimeout
+        let settled = false;
+        let timer;
+        function finish(fn) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          fn();
+        }
+        const req = GM_xmlhttpRequest({
           method: 'GET', url,
+          // blob for mobile — wider support on iOS/Android userscript managers than arraybuffer
           responseType: IS_MOBILE ? 'blob' : 'arraybuffer',
-          timeout: 300000, // 5-minute cap; prevents silent hangs on slow mobile connections
-          headers: { 'Referer': location.href, 'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8' },
+          // Spoof desktop UA so Pinterest CDN doesn't reject the request based on mobile UA
+          headers: {
+            'Referer':    location.href,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept':     'video/mp4,video/*;q=0.9,*/*;q=0.8',
+          },
           onprogress: e => { if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total); },
           onload: r => {
             if (r.status >= 200 && r.status < 300) {
-              const base = stripKnownExt(sanitizeFilename(filename || '')) || makeFallbackPinName();
-              const blob = IS_MOBILE ? r.response : new Blob([r.response], { type: 'video/mp4' });
-              const a    = document.createElement('a');
-              a.href     = URL.createObjectURL(blob);
-              a.download = base + '.mp4';
-              document.body.appendChild(a);
-              a.click();
-              setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
-              resolve();
+              finish(() => {
+                const base = stripKnownExt(sanitizeFilename(filename || '')) || makeFallbackPinName();
+                const blob = IS_MOBILE ? r.response : new Blob([r.response], { type: 'video/mp4' });
+                const a    = document.createElement('a');
+                a.href     = URL.createObjectURL(blob);
+                a.download = base + '.mp4';
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
+                resolve();
+              });
             } else {
-              tryNext();
+              finish(tryNext);
             }
           },
-          onerror:   tryNext,
-          ontimeout: tryNext,
+          onerror:   () => finish(tryNext),
+          ontimeout: () => finish(tryNext),
         });
+        // Manual 45s deadline — mobile connections sometimes hang indefinitely
+        timer = setTimeout(() => finish(() => { try { req.abort(); } catch(_){} tryNext(); }), 45000);
       }
       tryNext();
     });
@@ -1722,6 +1751,7 @@
               `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t3.mp4`,
               `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t4.mp4`,
               `https://v1.pinimg.com/videos/mc/720p/${m[2]}.mp4`,
+              rawSrc,
             ]
           : [
               `https://v1.pinimg.com/videos/mc/720p/${m[2]}.mp4`,
@@ -1729,9 +1759,10 @@
               `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t3.mp4`,
               `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t2.mp4`,
               `https://v1.pinimg.com/videos/mc/expMp4/${m[2]}_t1.mp4`,
+              rawSrc,
             ]
-        ).filter((u, i, a) => a.indexOf(u) === i)
-      : [bestUrl];
+        ).filter((u, i, a) => u && a.indexOf(u) === i)
+      : [bestUrl, rawSrc].filter((u, i, a) => u && a.indexOf(u) === i);
 
     const btn = document.createElement('button');
     btn.id    = 'pe-vid-dl-fab';
@@ -2323,7 +2354,12 @@
       body.pe-hide-comments [data-test-id="editor-with-mentions"],
       body.pe-hide-comments #dweb-comment-editor-container,
       body.pe-hide-comments #mweb-comment-editor-container,
-      body.pe-hide-comments [data-test-id="closeup-metadata-details-divider"] {
+      body.pe-hide-comments [data-test-id="closeup-metadata-details-divider"],
+      /* Comment icon button (desktop & mobile) */
+      body.pe-hide-comments button[aria-label="Comments"],
+      body.pe-hide-comments button[aria-label="comments"],
+      /* Mobile comment button wrapper */
+      body.pe-hide-comments [data-test-id="comment-button"] {
         display: none !important;
       }
 
@@ -2387,19 +2423,19 @@
 
       #pe-settings-panel {
         background: #fff;
-        border-radius: 14px;
+        border-radius: 12px;
         box-shadow: 0 4px 28px rgba(0,0,0,.16), 0 1px 4px rgba(0,0,0,.08);
         border: 1px solid rgba(0,0,0,.07);
-        min-width: 268px;
+        min-width: 230px;
         overflow: hidden;
         animation: pe-bd-pop .15s ease-out;
       }
       #pe-settings-title {
-        padding: 11px 14px 9px;
+        padding: 8px 12px 7px;
         background: #e60023;
         color: #fff;
         font-weight: 700;
-        font-size: 16px;
+        font-size: 13px;
         letter-spacing: .02em;
         display: flex;
         align-items: baseline;
@@ -2420,7 +2456,7 @@
 
       .pe-row {
         display: flex; align-items: center; justify-content: space-between;
-        padding: 8px 14px; gap: 12px;
+        padding: 7px 12px; gap: 10px;
         transition: background .12s;
         border-top: 1px solid #f2f2f2;
       }
@@ -2429,10 +2465,10 @@
       .pe-info { flex: 1; min-width: 0; }
       .pe-name {
         display: block; font-weight: 600; color: #111;
-        font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
       .pe-desc {
-        display: block; font-size: 11px; color: #767676; margin-top: 1px;
+        display: block; font-size: 10px; color: #767676; margin-top: 1px;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
 
@@ -2459,7 +2495,7 @@
       .pe-group { border-top: 1px solid #f2f2f2; }
       .pe-group-header {
         display: flex; align-items: center; justify-content: space-between;
-        padding: 8px 14px; gap: 12px; cursor: pointer; transition: background .12s;
+        padding: 7px 12px; gap: 10px; cursor: pointer; transition: background .12s;
       }
       .pe-group-header:hover { background: #fafafa; }
       .pe-chevron { transition: transform .2s; flex-shrink: 0; color: #767676; }
@@ -2761,6 +2797,14 @@
     // Video downloader FAB
     initVideoDownloader();
 
+    // Mobile: retry video fab after a delay — video src is often set after DOMContentLoaded
+    if (IS_MOBILE && /\/pin\/\d/i.test(location.pathname)) {
+      [1500, 3500].forEach(ms => setTimeout(() => {
+        if (!document.getElementById('pe-vid-dl-fab') && get('videoDownloader'))
+          createVideoDlFab();
+      }, ms));
+    }
+
     // Scroll preservation (restores position on browser back)
     initScrollPreservation();
 
@@ -2795,13 +2839,13 @@
         if (get('videoDownloader')) createVideoDlFab();
       }, 600);
 
-      // Second attempt after a longer delay in case lazy-loaded DOM is slow
-      setTimeout(() => {
+      // Further attempts with increasing delays — mobile video src can arrive late
+      [1800, 3500].forEach(ms => setTimeout(() => {
         if (!document.getElementById('pe-bd-btn') && get('boardDownloader') && isBoardPage())
           createBoardDownloaderUI();
         if (!document.getElementById('pe-vid-dl-fab') && get('videoDownloader'))
           createVideoDlFab();
-      }, 1800);
+      }, ms));
     }
 
     // Wrap history methods

@@ -6,7 +6,7 @@
 
 **The all-in-one Pinterest userscript that makes Pinterest actually good.**
 
-[![Version](https://img.shields.io/badge/Version-1.3.2-red?style=flat-square)](https://github.com/Angel2mp3)
+[![Version](https://img.shields.io/badge/Version-1.3.3-red?style=flat-square)](https://github.com/Angel2mp3)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![FMHY](https://img.shields.io/badge/Featured%20on-FMHY-purple?style=flat-square)](https://fmhy.net/social-media-tools#social-media-tools)
 
@@ -32,7 +32,7 @@
 ### 🖼️ Original Quality Images
 Pinterest serves downscaled thumbnails by default. This script silently rewrites every image URL to load the **full original resolution** from Pinterest's CDN — no popups, no loading delays. Falls back to high-res (`736x`) if the original isn't available.
 
-### 📹 Video Downloader (NEW)
+### 📹 Video Downloader (NEW) - Experimental
 Adds a download button on video pin closeup pages. Downloads the video at original **720p quality** directly from Pinterest's CDN — works on both desktop and mobile. Handles Pinterest's HLS streaming format automatically.
 
 ### 🗂️ Board Downloader

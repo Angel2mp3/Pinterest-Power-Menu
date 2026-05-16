@@ -3,9 +3,8 @@
 // @description  All-in-one Pinterest power tool: original quality, download fixer, closeup image/video downloads, visible text translation, GIF hover/auto-play, remove videos, hide UI elements, declutter, scroll preservation
 // @version      1.4.0
 // @author       Angel
-// @namespace    https://angelmakes.software
+// @namespace    https://github.com/Angel2mp3
 // @homepageURL  https://angelmakes.software
-// @supportURL   https://github.com/Angel2mp3
 // @icon         https://www.pinterest.com/favicon.ico
 // @match        https://www.pinterest.com/*
 // @match        https://pinterest.com/*

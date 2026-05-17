@@ -267,14 +267,6 @@ Manual install:
 
 ---
 
-## 🧭 Usage
-
-After installation, visit Pinterest and open the gear button in the bottom-right corner. Most options apply immediately, so you can turn downloads, declutter tools, translation, reverse image search, and UI hiding on or off without reloading.
-
-Reverse image search and download buttons appear on supported pins, closeups, and media surfaces when their settings are enabled. If Pinterest changes its layout, refresh the page first, then check the troubleshooting notes below.
-
----
-
 ## 🔐 Privacy And Security
 
 - The script only runs on Pinterest pages matched by the userscript metadata.
@@ -282,23 +274,6 @@ Reverse image search and download buttons appear on supported pins, closeups, an
 - Download and media features may request Pinterest-hosted media with `GM_xmlhttpRequest` so files can be saved at the best available quality.
 - Reverse image search opens the selected provider with the current image URL; some providers may receive that image URL when you choose them.
 - The script does not ask for passwords, API keys, tokens, cookies, or extra accounts beyond your normal Pinterest session.
-
----
-
-## 🧪 Testing
-
-Run the local smoke test with Node.js:
-
-```bash
-node tests/userscript-feature-smoke.test.js
-```
-
-Optional syntax checks:
-
-```bash
-node --check PinterestPowerMenu.user.js
-node --check tests/userscript-feature-smoke.test.js
-```
 
 ---
 

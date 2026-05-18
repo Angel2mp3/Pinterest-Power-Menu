@@ -4,7 +4,7 @@
 
 # Pinterest Power Menu
 
-**An all-in-one userscript that makes Pinterest actually good.**
+**The all-in-one userscript that makes Pinterest actually good.**
 
 [![Version](https://img.shields.io/badge/Version-v1.4.0-red?style=flat-square)](https://github.com/Angel2mp3)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)

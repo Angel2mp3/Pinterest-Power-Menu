@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
-// @description  All-in-one Pinterest power tool: original quality, download fixer, closeup image/video downloads, visible text translation, GIF hover/auto-play, remove videos, hide UI elements, declutter, scroll preservation
-// @version      1.4.0
+// @description  All-in-one Pinterest power tool: original quality, download fixer, closeup image/video downloads, visible text translation, GIF hover/auto-play, remove videos, hide UI elements, declutter, AI content filter
+// @version      1.5.0
 // @author       Angel
 // @namespace    https://github.com/Angel2mp3
 // @homepageURL  https://angelmakes.software
@@ -26,12 +26,12 @@
   //  SETTINGS
   // ═══════════════════════════════════════════════════════════════════
   const SETTINGS_KEY = 'pe_settings_v1';
-  const SCRIPT_VERSION = '1.4.0';
+  const SCRIPT_VERSION = '1.5.0';
   const UPDATE_NOTES_HIGHLIGHTS = [
-    'Quick Download button on every pin closeup — works for videos too, not just images.',
-    'Reverse Image Search button on closeups — Google, Yandex, SauceNAO, TinEye.',
-    'Auto-Play Visible Videos — more reliable, with canplay waits, retries, and tab-visibility resume.',
-    'New: hover Download button on every pin in feed/search/discovery grids — no closeup needed.',
+    'Hide AI Content — filter AI-generated pins with Conservative / Balanced / Aggressive tiers and custom keywords.',
+    'Hide by Keywords — block pins by title or auto-label keywords.',
+    'Hide "See More Like This" popup — removes the proactive outreach flyout that appears over pins.',
+    'New Hide UI Elements toggles: comment emoji, sticker, photo pickers, and more.',
   ];
 
   // ── Mobile / touch detection ─────────────────────────────────────────
@@ -64,6 +64,11 @@
     darkMode:         'auto',
     removeVideos:     false,
     hideShopPosts:    false,
+    hideAiContent:    false,
+    aiContentAggressiveness: 'balanced',  // 'conservative' | 'balanced' | 'aggressive'
+    aiContentKeywords: '',                 // comma-separated, user-supplied
+    titleBlockEnabled: false,              // hide pins whose title/auto-name matches
+    titleBlockKeywords: '',                // comma-separated blocklist words
     hideComments:     false,
     hideCommentButton: false,
     hideReactButton:  false,
@@ -77,6 +82,7 @@
     hideCommentEmojiButton: false,
     hideCommentStickerButton: false,
     hideCommentPhotoButton: false,
+    hideProactiveOutreach: false,
     autoTranslate:    false,
     autoTranslateTitles: false,
     autoTranslateDescriptions: false,
@@ -90,13 +96,46 @@
     reverseImageSearchButton: true,
     updateNotesDisabled: false,
     lastUpdateNotesVersion: '',
+    // All-time statistics. Each stat is opt-in (off by default); counting only
+    // happens while its show flag is on. Counts are cumulative across sessions.
+    statShowAdsBlocked: false,
+    statShowAiBlocked: false,
+    statShowImagesDownloaded: false,
+    statShowVideosDownloaded: false,
+    statShowCommentsTranslated: false,
+    statCountAdsBlocked: 0,
+    statCountAiBlocked: 0,
+    statCountImagesDownloaded: 0,
+    statCountVideosDownloaded: 0,
+    statCountCommentsTranslated: 0,
   };
 
   let _cfg = null;
 
+  // Persistence with a localStorage fallback.  Some userscript engines (notably
+  // Hermit on Android) declare @grant for GM_setValue/GM_getValue but don't
+  // actually persist them across page loads, so settings + the changelog-dismiss
+  // flag would reset every time.  We prefer GM storage when it returns a value
+  // and always mirror to localStorage (Pinterest is a single origin, so it
+  // survives reloads).  The PE_ prefix avoids colliding with Pinterest's keys.
+  function storageRead(key) {
+    try {
+      if (typeof GM_getValue === 'function') {
+        const v = GM_getValue(key, null);
+        if (v != null) return v;
+      }
+    } catch (_) {}
+    try { return localStorage.getItem('PE_' + key); } catch (_) { return null; }
+  }
+
+  function storageWrite(key, val) {
+    try { if (typeof GM_setValue === 'function') GM_setValue(key, val); } catch (_) {}
+    try { localStorage.setItem('PE_' + key, val); } catch (_) {}
+  }
+
   function loadCfg() {
     try {
-      const raw = GM_getValue(SETTINGS_KEY, null);
+      const raw = storageRead(SETTINGS_KEY);
       const saved = raw ? JSON.parse(raw) : {};
       _cfg = { ...DEFAULTS, ...saved };
       if (saved.autoTranslate === true) {
@@ -115,7 +154,7 @@
   }
 
   function saveCfg() {
-    try { GM_setValue(SETTINGS_KEY, JSON.stringify(_cfg)); } catch (_) {}
+    try { storageWrite(SETTINGS_KEY, JSON.stringify(_cfg)); } catch (_) {}
   }
 
   function rememberMissingDefaultPrefs(saved) {
@@ -137,6 +176,26 @@
     if (!_cfg) loadCfg();
     _cfg[key] = val;
     saveCfg();
+  }
+
+  // ── All-time statistics counters ──────────────────────────────────
+  // Updates the live count shown in the settings panel, if it's open.
+  function updateStatDisplay(countKey) {
+    const el = document.getElementById('pe-stat-val-' + countKey);
+    if (el) el.textContent = String(Number(get(countKey)) || 0);
+  }
+
+  // Increment a counter only while its stat is enabled. Persistence is
+  // debounced so high-frequency events (filtering, translating) don't
+  // serialize the whole config on every hit.
+  let _statsSaveTimer = null;
+  function bumpStat(showKey, countKey) {
+    if (!get(showKey)) return;
+    if (!_cfg) loadCfg();
+    _cfg[countKey] = (Number(get(countKey)) || 0) + 1;
+    updateStatDisplay(countKey);
+    clearTimeout(_statsSaveTimer);
+    _statsSaveTimer = setTimeout(saveCfg, 1000);
   }
 
   function shouldShowUpdateNotes() {
@@ -209,6 +268,8 @@
     style.id = 'pe-declutter-early-styles';
     style.textContent = `
       html.pe-declutter-enabled div[role="list"] > div[role="listitem"]:has(div[title="Sponsored"]),
+      html.pe-declutter-enabled div[role="list"] > div[role="listitem"]:has(div[title="Partner Content"]),
+      html.pe-declutter-enabled div[role="list"] > div[role="listitem"]:has(div[title="Sponsored Content"]),
       html.pe-declutter-enabled div[role="list"] > div[role="listitem"]:has([aria-label="Shoppable Pin indicator"]),
       html.pe-declutter-enabled div[role="list"] > div[role="listitem"]:has([data-test-id="product-price-text"]),
       html.pe-declutter-enabled div[role="list"] > div[role="listitem"]:has([data-test-id="pincard-product-with-link"]) {
@@ -444,6 +505,7 @@
     document.body.classList.toggle('pe-hide-comment-emoji', get('hideCommentEmojiButton'));
     document.body.classList.toggle('pe-hide-comment-sticker', get('hideCommentStickerButton'));
     document.body.classList.toggle('pe-hide-comment-photo', get('hideCommentPhotoButton'));
+    document.body.classList.toggle('pe-hide-proactive-outreach', get('hideProactiveOutreach'));
   }
 
   // Physically removes the Messages nav button from the DOM (not just hidden with CSS).
@@ -1431,9 +1493,23 @@
     return matched;
   }
 
+  // True only for genuine ads (Sponsored / Partner / Promoted), used by the
+  // "Ads blocked" stat — a stricter subset of isDeclutterPin.
+  function isSponsoredPin(pin) {
+    if (pin.querySelector('div[title="Sponsored"]')) return true;
+    if (pin.querySelector('div[title="Partner Content"], div[title="Sponsored Content"], div[title="Promoted"]')) return true;
+    const typeId = pin.querySelector('[data-test-id="PinTypeIdentifier"]');
+    if (typeId && /partner content|sponsored content|promoted|sponsored/i.test(typeId.textContent || '')) return true;
+    return false;
+  }
+
   function isDeclutterPin(pin) {
     // Sponsored
     if (pin.querySelector('div[title="Sponsored"]')) return true;
+    // Partner / Sponsored Content pin-type labels
+    if (pin.querySelector('div[title="Partner Content"], div[title="Sponsored Content"]')) return true;
+    const typeId = pin.querySelector('[data-test-id="PinTypeIdentifier"]');
+    if (typeId && /partner content|sponsored content/i.test(typeId.textContent || '')) return true;
     // Shoppable Pin indicator
     if (pin.querySelector('[aria-label="Shoppable Pin indicator"]')) return true;
     // Shopping cards / "Shop" headings
@@ -1463,6 +1539,7 @@
     if (!pin || pin.__peDecluttered) return false;
     if (!isDeclutterPin(pin)) return false;
     pin.__peDecluttered = true;
+    if (isSponsoredPin(pin)) bumpStat('statShowAdsBlocked', 'statCountAdsBlocked');
     collapseEl(pin);
     return true;
   }
@@ -1791,6 +1868,251 @@
 
 
   // ═══════════════════════════════════════════════════════════════════
+  //  MODULE: CONTENT FILTER  (hide AI pins + custom title-keyword blocklist)
+  // ═══════════════════════════════════════════════════════════════════
+  // A userscript cannot inspect image pixels, so AI detection is heuristic:
+  // Pinterest's own AI-disclosure labels (where present in the DOM) plus
+  // keyword/hashtag/alt-text matching. Higher aggressiveness = broader
+  // matching = more false positives. The same scan engine also powers a
+  // user-defined keyword blocklist that hides any pin whose title / Pinterest
+  // auto-generated description contains one of the listed words.
+
+  const AI_OPTIONS = [
+    { value: 'conservative', label: 'Conservative (labels + explicit tags)' },
+    { value: 'balanced',     label: 'Balanced (+ common AI tools/terms)' },
+    { value: 'aggressive',   label: 'Aggressive (+ loose signals, more false positives)' },
+  ];
+
+  // Substring phrases — specific enough to match directly.
+  const AI_PHRASES_CONSERVATIVE = [
+    '#aigenerated', 'ai generated', 'ai-generated', 'aigenerated',
+    'generative ai', 'genai', 'made with ai', 'created with ai',
+    'created using ai', 'ai created', 'generated with ai', 'generated by ai',
+  ];
+  const AI_PHRASES_BALANCED = [
+    'midjourney', 'dall-e', 'dall·e', 'dalle', 'stable diffusion',
+    'ai art', 'ai-art', 'aiart', 'ai image', 'ai images', 'ai artwork',
+    'ai generated art', 'ai illustration', 'adobe firefly', 'nightcafe',
+    'leonardo ai', 'leonardo.ai', 'ai model', 'text to image', 'text-to-image',
+    'sora ai', 'flux ai', 'comfyui', 'automatic1111', 'gpt image',
+  ];
+  // Aggressive-only loose signals (word-boundary regex to limit false hits).
+  const AI_REGEX_AGGRESSIVE = [
+    /\bai\b/, /#ai\b/, /\ba\.i\.\b/, /\bprompt:/, /\bai prompt\b/, /\bai tool\b/,
+  ];
+
+  function getAiKeywordSets() {
+    const level = get('aiContentAggressiveness');
+    const phrases = [...AI_PHRASES_CONSERVATIVE];
+    if (level === 'balanced' || level === 'aggressive') phrases.push(...AI_PHRASES_BALANCED);
+    String(get('aiContentKeywords') || '')
+      .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+      .forEach(kw => phrases.push(kw));
+    const regexes = level === 'aggressive' ? AI_REGEX_AGGRESSIVE : [];
+    return { phrases, regexes };
+  }
+
+  // Pinterest's own AI-disclosure label (strongest signal, used at every tier).
+  function findAiDisclosureLabel(pin) {
+    if (pin.querySelector(
+      '[data-test-id*="gen-ai" i],[data-test-id*="genai" i],' +
+      '[data-test-id*="ai-label" i],[data-test-id*="ai-disclosure" i],' +
+      '[data-test-id*="generative-ai" i]'
+    )) return true;
+    const labelRe = /\b(ai[\s-]?generated|generative ai|made with ai|created with ai|ai[\s-]?modified)\b/i;
+    for (const el of pin.querySelectorAll('[aria-label],[title]')) {
+      if (labelRe.test(el.getAttribute('aria-label') || '') || labelRe.test(el.getAttribute('title') || '')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Pinterest auto-names many pins (image alt / link aria-label) with a short
+  // machine description of the media even when the user set no title — e.g.
+  // "a picture of a cake with a blue background". We harvest those so keyword
+  // matching works on title-less pins too.
+  function getPinTitleText(pin) {
+    const parts = [];
+    // Scope to pin-page links only — board/profile/avatar links also carry
+    // aria-label/alt text (board names, usernames) that would trigger aggressive
+    // mode on pins that have nothing to do with AI.
+    pin.querySelectorAll('a[href*="/pin/"][aria-label]').forEach(a => {
+      parts.push((a.getAttribute('aria-label') || '').replace(/\s*pin page\s*$/i, ''));
+    });
+    pin.querySelectorAll('img[alt]').forEach(img => parts.push(img.getAttribute('alt') || ''));
+    return parts.join(' \n ').toLowerCase();
+  }
+
+  function collectAiText(pin) {
+    // Use only attribute-based text (alt, aria-label, title) so comments written
+    // by other users never contribute to AI detection and cause false positives.
+    return getPinTitleText(pin);
+  }
+
+  function isAiPin(pin) {
+    if (!pin || pin.nodeType !== 1) return false;
+    if (findAiDisclosureLabel(pin)) return true;
+    const { phrases, regexes } = getAiKeywordSets();
+    if (!phrases.length && !regexes.length) return false;
+    const text = collectAiText(pin);
+    if (!text) return false;
+    if (phrases.some(p => text.includes(p))) return true;
+    if (regexes.some(r => r.test(text))) return true;
+    return false;
+  }
+
+  // User-defined title/keyword blocklist (independent of the AI filter).
+  function getTitleBlockWords() {
+    if (!get('titleBlockEnabled')) return [];
+    return String(get('titleBlockKeywords') || '')
+      .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  }
+
+  function matchesTitleBlock(pin) {
+    const words = getTitleBlockWords();
+    if (!words.length) return false;
+    const text = getPinTitleText(pin);
+    if (!text) return false;
+    return words.some(w => text.includes(w));
+  }
+
+  function isContentFilterActive() {
+    return !!get('hideAiContent') || getTitleBlockWords().length > 0;
+  }
+
+  // Persist opened pin IDs across React re-renders. React replaces feed card
+  // DOM elements when the URL changes (closeup opens/closes), so a per-element
+  // flag alone doesn't survive. Storing the numeric pin ID in a Set means a
+  // freshly-rendered card for the same pin is still protected.
+  const _openedPinIds = new Set();
+  let _pinClickTrackerAdded = false;
+
+  function ensurePinClickTracker() {
+    if (_pinClickTrackerAdded) return;
+    _pinClickTrackerAdded = true;
+    document.addEventListener('click', e => {
+      const link = e.target.closest('a[href*="/pin/"]');
+      if (!link) return;
+      const m = (link.getAttribute('href') || '').match(/\/pin\/(\d+)/);
+      if (m) _openedPinIds.add(m[1]);
+      const listitem = link.closest('div[role="listitem"]');
+      if (listitem) listitem.__peUserOpened = true;
+    }, true);
+  }
+
+  function getPinIdFromCard(pin) {
+    const a = pin.querySelector('a[href*="/pin/"]');
+    if (!a) return null;
+    const m = (a.getAttribute('href') || '').match(/\/pin\/(\d+)/);
+    return m ? m[1] : null;
+  }
+
+  function shouldHideForFilter(pin) {
+    if (pin.__peUserOpened) return false;
+    const id = getPinIdFromCard(pin);
+    if (id && _openedPinIds.has(id)) return false;
+    if (get('hideAiContent') && isAiPin(pin)) {
+      bumpStat('statShowAiBlocked', 'statCountAiBlocked');
+      return true;
+    }
+    if (matchesTitleBlock(pin)) return true;
+    return false;
+  }
+
+  const _hiddenFilterPosts = new Map();
+  const _contentFilterListObservers = new Map();
+  let _contentFilterObs = null;
+
+  function hideFilteredPin(pin) {
+    if (pin.__peFilterHidden) return;
+    pin.__peFilterHidden = true;
+    _hiddenFilterPosts.set(pin, {
+      display: pin.style.display,
+      visibility: pin.style.visibility,
+      height: pin.style.height,
+      minHeight: pin.style.minHeight,
+      overflow: pin.style.overflow,
+    });
+    collapseEl(pin);
+  }
+
+  function restoreFilteredPosts() {
+    _hiddenFilterPosts.forEach((style, pin) => {
+      if (!pin || !pin.style) return;
+      pin.style.display = style.display;
+      pin.style.visibility = style.visibility;
+      pin.style.height = style.height;
+      pin.style.minHeight = style.minHeight;
+      pin.style.overflow = style.overflow;
+      delete pin.__peFilterHidden;
+    });
+    _hiddenFilterPosts.clear();
+  }
+
+  function filterContentPosts(container) {
+    if (!isContentFilterActive()) return;
+    container.querySelectorAll('div[role="listitem"]').forEach(pin => {
+      if (pin.__peFilterHidden) return;
+      if (shouldHideForFilter(pin)) hideFilteredPin(pin);
+    });
+  }
+
+  function attachContentFilterListObserver(listEl) {
+    if (_contentFilterListObservers.has(listEl)) return;
+    // Don't observe comment sections — comment text / author names would cause
+    // aggressive-mode false positives that collapse the whole post.
+    if (listEl.closest(
+      '[data-test-id*="comment"],[data-test-id="closeup-comments"],' +
+      '[data-test-id="comment-list"],[data-test-id="comment-feed"]'
+    )) return;
+    filterContentPosts(listEl);
+    const onMutate = IS_MOBILE ? debounce(() => filterContentPosts(listEl), 200) : () => filterContentPosts(listEl);
+    const obs = new MutationObserver(records => {
+      if (hasOnlyPowerMenuMutations(records)) return;
+      onMutate();
+    });
+    // Watch attribute changes too: Pinterest lazily fills in alt / aria-label /
+    // title after the card mounts, so a childList-only observer would miss pins
+    // until something else re-rendered them (the "only hides after I click it" bug).
+    obs.observe(listEl, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['alt', 'aria-label', 'title', 'data-test-id'],
+    });
+    _contentFilterListObservers.set(listEl, obs);
+  }
+
+  function stopContentFilter({ restore = true } = {}) {
+    if (_contentFilterObs) { _contentFilterObs.disconnect(); _contentFilterObs = null; }
+    _contentFilterListObservers.forEach(obs => obs.disconnect());
+    _contentFilterListObservers.clear();
+    if (restore) restoreFilteredPosts();
+  }
+
+  function initContentFilter() {
+    if (!isContentFilterActive()) return;
+    ensurePinClickTracker();
+
+    document.querySelectorAll('div[role="list"]').forEach(attachContentFilterListObserver);
+
+    if (_contentFilterObs) return;
+    _contentFilterObs = new MutationObserver(records => {
+      if (hasOnlyPowerMenuMutations(records)) return;
+      document.querySelectorAll('div[role="list"]').forEach(attachContentFilterListObserver);
+    });
+    _contentFilterObs.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  // Re-evaluate every pin after a toggle / aggressiveness / keyword change.
+  function refreshContentFilter() {
+    stopContentFilter({ restore: true });
+    if (isContentFilterActive()) initContentFilter();
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════
   //  MODULE: HIDE COMMENTS
   // ═══════════════════════════════════════════════════════════════════
   function hideCommentEditorWrapper() {
@@ -2114,6 +2436,7 @@
     el.title = 'Original: ' + original;
     el.classList.add('pe-translated-text');
     removeManualTranslateButtonFor(el);
+    if (type === 'comment') bumpStat('statShowCommentsTranslated', 'statCountCommentsTranslated');
     return 'done';
   }
 
@@ -2447,7 +2770,7 @@
 
 
   // ═══════════════════════════════════════════════════════════════════
-  //  MODULE: DOWNLOAD FIXER  (original Angel2mp3 logic, intact)
+  //  MODULE: DOWNLOAD FIXER
   // ═══════════════════════════════════════════════════════════════════
   function detectFileType(arr) {
     if (arr.length < 12) return '.jpg';
@@ -2610,38 +2933,72 @@
     return Math.max(0, rect.width) * Math.max(0, rect.height);
   }
 
+  // Pinterest's closeup container test-ids differ by surface and have drifted
+  // over time. Desktop uses closeup-body / closeup-image / closeup-visual-container.
+  // Current mobile (m-web) nests the focused pin as
+  //   CloseupMainPin > closeup-body-portrait > closeup-container >
+  //   story-pin-full-bleed-slideshow-mweb
+  // and renders the pin video as video[data-test-id="duplo-hls-video"]. The old
+  // selectors matched none of these, so on mobile getFocusedCloseupRoot returned
+  // null — which killed video detection and the in-DOM video element lookup, and
+  // forced document-wide image fallbacks that grabbed the wrong pin's media.
+  // Recognise both layouts so the focused-pin scope works everywhere.
+  const FOCUSED_CLOSEUP_ROOT_SELECTOR =
+    '[data-grid-item-idx], ' +
+    '[data-test-id="closeup-body"], ' +
+    '[data-test-id="closeup-body-style"], ' +
+    '[data-test-id="closeup-body-portrait"], ' +
+    '[data-test-id="CloseupMainPin"], ' +
+    '[data-test-id="closeup-container"]';
+
+  const CLOSEUP_VISUAL_SIGNAL_SELECTOR =
+    '[data-test-id="closeup-image"], ' +
+    '[data-test-id="closeup-visual-container"], ' +
+    '[data-test-id="visual-content-container"], ' +
+    '[data-test-id="pin-closeup-image"], ' +
+    '[data-test-id="story-pin-full-bleed-slideshow-mweb"], ' +
+    '[data-test-id="story-pin-video-block"], ' +
+    '[data-test-id="duplo-hls-video"]';
+
+  // Tightest "the pin media lives here" wrapper, used to scope image/video
+  // collection to the focused pin (never the whole document, never related pins).
+  const CLOSEUP_VISUAL_PART_SELECTOR =
+    '[data-test-id="closeup-visual-container"], ' +
+    '[data-test-id="visual-content-container"], ' +
+    '[data-test-id="story-pin-full-bleed-slideshow-mweb"], ' +
+    '[data-test-id="pin-closeup-image"], ' +
+    '[data-test-id="closeup-image"]';
+
   function scoreFocusedCloseupRoot(root) {
     if (!root?.querySelector) return -1;
-    if (!root.querySelector('[data-test-id="closeup-image"], [data-test-id="closeup-visual-container"], [data-test-id="visual-content-container"]')) return -1;
+    if (!root.querySelector(CLOSEUP_VISUAL_SIGNAL_SELECTOR)) return -1;
     let score = 0;
-    if (root.matches?.('[data-grid-item-idx], [data-test-id="closeup-body"], [data-test-id="closeup-body-style"]')) score += 6;
-    if (root.querySelector('[data-test-id="closeup-action-bar"], [data-test-id="closeup-action-items"]')) score += 6;
-    if (root.querySelector('[data-test-id="closeup-visual-container"]')) score += 4;
-    if (root.querySelector('[data-test-id="closeup-image"] img, [data-test-id="closeup-image"] video')) score += 4;
-    if (isElementActuallyVisible(root.querySelector('[data-test-id="closeup-visual-container"], [data-test-id="closeup-image"]') || root)) score += 8;
+    if (root.matches?.(FOCUSED_CLOSEUP_ROOT_SELECTOR)) score += 6;
+    if (root.querySelector('[data-test-id="closeup-action-bar"], [data-test-id="closeup-action-items"], [data-test-id="closeup-pin-action-items"]')) score += 6;
+    if (root.querySelector('[data-test-id="closeup-visual-container"], [data-test-id="story-pin-full-bleed-slideshow-mweb"]')) score += 4;
+    if (root.querySelector('[data-test-id="closeup-image"] img, [data-test-id="closeup-image"] video, [data-test-id="duplo-hls-video"]')) score += 4;
+    if (isElementActuallyVisible(root.querySelector(CLOSEUP_VISUAL_SIGNAL_SELECTOR) || root)) score += 8;
     score += Math.min(8, getElementArea(root) / 100000);
     return score;
   }
 
   function getFocusedCloseupRoot(anchor) {
     if (anchor?.closest) {
-      let anchoredRoot = anchor.closest('[data-grid-item-idx], [data-test-id="closeup-body"], [data-test-id="closeup-body-style"]');
+      let anchoredRoot = anchor.closest(FOCUSED_CLOSEUP_ROOT_SELECTOR);
       while (anchoredRoot) {
         if (scoreFocusedCloseupRoot(anchoredRoot) >= 0) return anchoredRoot;
-        anchoredRoot = anchoredRoot.parentElement?.closest?.('[data-grid-item-idx], [data-test-id="closeup-body"], [data-test-id="closeup-body-style"]');
+        anchoredRoot = anchoredRoot.parentElement?.closest?.(FOCUSED_CLOSEUP_ROOT_SELECTOR);
       }
     }
 
     const candidates = new Set();
-    document.querySelectorAll('[data-test-id="closeup-image"], [data-test-id="closeup-visual-container"]').forEach(el => {
+    document.querySelectorAll(CLOSEUP_VISUAL_SIGNAL_SELECTOR).forEach(el => {
       candidates.add(el);
-      const closeupRoot = el.closest('[data-grid-item-idx], [data-test-id="closeup-body"], [data-test-id="closeup-body-style"]');
+      const closeupRoot = el.closest(FOCUSED_CLOSEUP_ROOT_SELECTOR);
       if (closeupRoot) candidates.add(closeupRoot);
-      const actionRoot = el.closest('[data-test-id="closeup-body-style"], [data-test-id="closeup-body"]');
-      if (actionRoot) candidates.add(actionRoot);
     });
-    document.querySelectorAll('[data-grid-item-idx], [data-test-id="closeup-body"], [data-test-id="closeup-body-style"]').forEach(el => {
-      if (el.querySelector('[data-test-id="closeup-image"], [data-test-id="closeup-visual-container"]')) candidates.add(el);
+    document.querySelectorAll(FOCUSED_CLOSEUP_ROOT_SELECTOR).forEach(el => {
+      if (el.querySelector(CLOSEUP_VISUAL_SIGNAL_SELECTOR)) candidates.add(el);
     });
     return [...candidates]
       .map(el => ({ el, score: scoreFocusedCloseupRoot(el) }))
@@ -2668,19 +3025,9 @@
   function getCloseupVisualScope(anchor) {
     const focusedRoot = getFocusedCloseupRoot(anchor);
     if (focusedRoot) {
-      return getCloseupScopePart(focusedRoot,
-        '[data-test-id="closeup-visual-container"], ' +
-        '[data-test-id="visual-content-container"], ' +
-        '[data-test-id="pin-closeup-image"], ' +
-        '[data-test-id="closeup-image"]'
-      ) || focusedRoot;
+      return getCloseupScopePart(focusedRoot, CLOSEUP_VISUAL_PART_SELECTOR) || focusedRoot;
     }
-    return document.querySelector(
-      '[data-test-id="closeup-visual-container"], ' +
-      '[data-test-id="visual-content-container"], ' +
-      '[data-test-id="pin-closeup-image"], ' +
-      '[data-test-id="closeup-image"]'
-    ) || document;
+    return document.querySelector(CLOSEUP_VISUAL_PART_SELECTOR) || document;
   }
 
   function getCurrentCarouselSlide(scope) {
@@ -2923,6 +3270,7 @@
       document.body.appendChild(a);
       a.click();
       setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
+      bumpStat('statShowImagesDownloaded', 'statCountImagesDownloaded');
       return true;
     } catch (_) {
       return false;
@@ -3145,6 +3493,7 @@
       '[data-test-id="closeup-visual-container"], ' +
       '[data-test-id="visual-content-container"], ' +
       '[data-test-id="story-pin-video-block"], ' +
+      '[data-test-id="story-pin-full-bleed-slideshow-mweb"], ' +
       '[data-test-id="pin-closeup-image"], ' +
       '[data-test-id="closeup-image"]'
     ) || focusedRoot;
@@ -3595,6 +3944,39 @@
     return null;
   }
 
+  // Mobile gif closeups render the pin as a static JPEG <img> — no gif badge or
+  // test-id distinguishes them from a photo — while the animated file lives at
+  // /originals/<hash>.gif. Detect a gif from any available page signal so the
+  // download can prefer the animated file instead of saving the still frame.
+  function focusedCloseupLooksLikeGif(scope) {
+    const root = scope?.querySelectorAll ? scope : null;
+    if (root) {
+      if (isMobileGifPin(root)) return true;
+      for (const img of root.querySelectorAll('img')) {
+        const attrs = (img.getAttribute('srcset') || '') + ' ' + (img.currentSrc || '') + ' ' +
+          (img.getAttribute('src') || '') + ' ' + (img.getAttribute('data-src') || '');
+        if (/\.gif(?:[?"\s]|$)/i.test(attrs)) return true;
+      }
+      if (/i\.pinimg\.com\/[^"'\\)\s]*\.gif/i.test(root.innerHTML || '')) return true;
+      const badge = root.querySelector('[data-test-id="PinTypeIdentifier"]');
+      if (badge && /gif|animated/i.test(badge.textContent || '')) return true;
+    }
+    const pinData = findCurrentPinDataFromRelayScripts(getCurrentPinIdFromLocation());
+    if (pinData && collectPinterestDataStrings(pinData).some(s => /\.gif(?:[?"\\]|$)/i.test(String(s || '')))) return true;
+    return false;
+  }
+
+  // Returns the animated .gif URL to prefer for a gif closeup, or null. Only the
+  // /originals/<hash>.gif derived from the still is returned; callers must keep
+  // the still as a fallback so a false positive can never break a photo download.
+  function resolveFocusedCloseupGifUrl(scope, imageUrl) {
+    if (!imageUrl) return null;
+    if (/\.gif(?:[?#]|$)/i.test(imageUrl)) return imageUrl; // closeup already exposes the gif
+    const derived = deriveGifUrl(imageUrl);
+    if (!derived) return null;
+    return focusedCloseupLooksLikeGif(scope) ? derived : null;
+  }
+
   async function downloadCurrentCloseupMedia(btn) {
     const title = extractFocusedPinTitle(btn);
 
@@ -3623,7 +4005,12 @@
       showPowerMenuToast('Could not get the video — tap download again');
       return false;
     }
-    return currentImageUrl ? downloadSingle(currentImageUrl, title) : false;
+    if (!currentImageUrl) return false;
+    // GIF pins: prefer the animated /originals/.gif, but fall back to the still
+    // frame if the derived gif isn't actually available (false positive safety).
+    const gifUrl = resolveFocusedCloseupGifUrl(getCloseupVisualScope(btn), currentImageUrl);
+    if (gifUrl && gifUrl !== currentImageUrl && await downloadSingle(gifUrl, title)) return true;
+    return downloadSingle(currentImageUrl, title);
   }
 
   function isEligiblePinCardQuickDownloadCard(card) {
@@ -4201,7 +4588,7 @@
   // accumulator set.  Called repeatedly while scrolling so we catch
   // images before Pinterest's virtual list recycles those DOM nodes.
   // Also captures pin titles from title elements in each pin card.
-  function snapshotPinUrls(seen, urls, names) {
+  function snapshotPinUrls(seen, urls, names, ids) {
     document.querySelectorAll('img[src*="i.pinimg.com"]').forEach(img => {
       // Skip tiny avatars/icons
       const w = img.naturalWidth || img.width;
@@ -4218,6 +4605,7 @@
         seen.add(url);
         urls.push(url);
         names.set(url, extractPinTitleFromScope(pinScope));
+        if (ids) ids.set(url, pinScope ? getPinIdFromCard(pinScope) : null);
       }
     });
   }
@@ -4236,7 +4624,7 @@
       const pinScope = vid.closest(
         '[data-test-id="pinWrapper"], [data-grid-item="true"], [data-test-id="pin"], div[role="listitem"]'
       );
-      vidItems.push({ channel: m[1], hash: m[2], title: extractPinTitleFromScope(pinScope) });
+      vidItems.push({ channel: m[1], hash: m[2], title: extractPinTitleFromScope(pinScope), pinId: pinScope ? getPinIdFromCard(pinScope) : null });
     });
   }
 
@@ -4248,12 +4636,13 @@
     const seen     = new Set();
     const urls     = [];
     const names    = new Map();
+    const ids      = new Map();
     const vidSeen  = new Set();
     const vidItems = [];
     return new Promise(resolve => {
       let lastH = 0, stall = 0;
       const t = setInterval(() => {
-        snapshotPinUrls(seen, urls, names);            // grab current DOM before scroll
+        snapshotPinUrls(seen, urls, names, ids);       // grab current DOM before scroll
         snapshotVideoUrls(vidSeen, vidItems);
         window.scrollTo(0, document.body.scrollHeight);
         const h = document.body.scrollHeight;
@@ -4261,11 +4650,11 @@
         if (h === lastH) {
           stall++;
           if (stall >= 12) {
-            snapshotPinUrls(seen, urls, names);        // final grab
+            snapshotPinUrls(seen, urls, names, ids);   // final grab
             snapshotVideoUrls(vidSeen, vidItems);
             clearInterval(t);
             window.scrollTo(0, 0);
-            resolve({ urls, names, vidItems });
+            resolve({ urls, names, ids, vidItems });
           }
         } else {
           stall = 0;
@@ -4298,14 +4687,19 @@
 
   // ─── Save all board images + videos as named downloads ──────────
   async function downloadBoardFolder(setStatus) {
-    const { urls, names, vidItems } = await collectAllPins(setStatus);
+    const { urls, names, ids, vidItems } = await collectAllPins(setStatus);
     const totalItems = urls.length + vidItems.length;
     if (!totalItems) { alert('[Pinterest Power Menu] No images or videos found on this board.'); return; }
 
-    // Use pin title only. If unavailable, use: "Pin - 12345678".
+    // Prefer the pin title. If unavailable, fall back to the pin's real ID
+    // ("Pin - 901212575447549382") taken from its grid card link, matching the
+    // single-pin page. Only use a random name when neither title nor ID exists.
     function makeFileName(url, ext) {
       let pinName = stripKnownExt(sanitizeFilename(names.get(url) || ''));
-      if (!pinName) pinName = makeFallbackPinName();
+      if (!pinName) {
+        const id = ids.get(url);
+        pinName = id ? `Pin - ${id}` : makeFallbackPinName();
+      }
       if (pinName.length > 120) pinName = pinName.slice(0, 120).trimEnd();
       return `${pinName}${ext}`;
     }
@@ -4329,6 +4723,7 @@
         setTimeout(() => URL.revokeObjectURL(a.href), 200);
         await new Promise(r => setTimeout(r, 300));
         saved++;
+        bumpStat('statShowImagesDownloaded', 'statCountImagesDownloaded');
       } catch (_) {}
       setStatus('fetch', saved, totalItems);
     }
@@ -4344,7 +4739,7 @@
             `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t1.mp4`,
           ]
         : [`https://v1.pinimg.com/videos/iht/expMp4/${vi.hash}_720w.mp4`];
-      const title = stripKnownExt(sanitizeFilename(vi.title || '')) || makeFallbackPinName();
+      const title = stripKnownExt(sanitizeFilename(vi.title || '')) || (vi.pinId ? `Pin - ${vi.pinId}` : makeFallbackPinName());
       try {
         await downloadVideoFile(fallbackUrls, title, null);
         saved++;
@@ -4510,6 +4905,7 @@
                 document.body.appendChild(a);
                 a.click();
                 setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
+                bumpStat('statShowVideosDownloaded', 'statCountVideosDownloaded');
                 resolve();
               });
             } else {
@@ -4635,7 +5031,7 @@
     { key: 'videoAutoPlay',   label: 'Auto-Play Visible Videos', desc: 'Auto-play all pin videos on screen (muted), pause when scrolled away', reload: false },
     { key: 'infiniteLoopVideo', label: 'Loop Closeup Videos',  desc: 'Auto-replay closeup videos instead of showing the "Watch again" button', reload: false },
     { key: 'boardDownloader', label: 'Board Downloader',       desc: 'Download all images from the current board',              reload: true  },
-    { key: 'declutter',       label: 'Declutter',              desc: 'Remove ads, quizzes, sponsored & shopping pins',           reload: false },
+    { key: 'declutter',       label: 'Declutter',              desc: 'Remove ads, quizzes, sponsored, partner & shopping pins',  reload: false },
     { key: 'removeVideos',    label: 'Remove Videos',          desc: 'Remove all video pins from the feed',                      reload: false },
     { key: 'contextMenu',     label: 'Image Context Menu',     desc: 'Right-click pins to copy, open or save the original',      reload: false },
     { key: 'reverseImageSearchButton', label: 'Reverse Image Search Button', desc: 'Show reverse search providers above closeup images', reload: false },
@@ -4701,8 +5097,19 @@
     { key: 'hideCommentEmojiButton', label: 'Hide Comment Emoji Button', desc: 'Hide the emoji picker in comment composer',      reload: false },
     { key: 'hideCommentStickerButton', label: 'Hide Comment Sticker Button', desc: 'Hide the sticker picker in comment composer', reload: false },
     { key: 'hideCommentPhotoButton', label: 'Hide Comment Photo Button', desc: 'Hide the photo picker in comment composer',      reload: false },
+    { key: 'hideProactiveOutreach', label: 'Hide "See More Like This" Popup', desc: 'Hide the proactive outreach flyout that appears over pins', reload: false },
   ];
   const VISIBLE_HIDE_FEATURES = IS_MOBILE ? HIDE_FEATURES.filter(f => f.key !== 'hideUploadImageButton') : HIDE_FEATURES;
+
+  // All-time statistics rows. Each is opt-in: the toggle both enables counting
+  // and reveals the running total.
+  const STAT_ITEMS = [
+    { show: 'statShowAdsBlocked',         count: 'statCountAdsBlocked',         label: 'Ads Blocked',         desc: 'Sponsored / promoted pins removed' },
+    { show: 'statShowAiBlocked',          count: 'statCountAiBlocked',          label: 'AI Content Blocked',  desc: 'Likely AI-generated pins hidden' },
+    { show: 'statShowImagesDownloaded',   count: 'statCountImagesDownloaded',   label: 'Images Downloaded',   desc: 'Image files saved by the script' },
+    { show: 'statShowVideosDownloaded',   count: 'statCountVideosDownloaded',   label: 'Videos Downloaded',   desc: 'Video files saved by the script' },
+    { show: 'statShowCommentsTranslated', count: 'statCountCommentsTranslated', label: 'Comments Translated', desc: 'Comments auto-translated' },
+  ];
 
   function escapeAttr(value) {
     return String(value || '').replace(/[&<>"']/g, ch => ({
@@ -4777,6 +5184,58 @@
               <span class="pe-knob"></span>
             </label>
           </div>`).join('')}
+        <div class="pe-row">
+          <div class="pe-info">
+            <span class="pe-name">Hide AI Content</span>
+            <span class="pe-desc">Hide likely AI-generated pins (heuristic)</span>
+          </div>
+          <button type="button" id="pe-ai-chevron" class="pe-inline-chevron" aria-label="Show AI content options" aria-expanded="false">
+            <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+              <path d="M7 10l5 5 5-5z"/>
+            </svg>
+          </button>
+          <label class="pe-switch">
+            <input type="checkbox" data-key="hideAiContent" data-reload="false" ${get('hideAiContent') ? 'checked' : ''}>
+            <span class="pe-knob"></span>
+          </label>
+        </div>
+        <div id="pe-ai-suboptions" style="display:none">
+          <div class="pe-row pe-sub-row pe-select-row">
+            <div class="pe-info">
+              <span class="pe-name">Aggressiveness</span>
+              <span class="pe-desc">Higher catches more, but more false positives</span>
+            </div>
+            <select class="pe-setting-select" data-key="aiContentAggressiveness">
+              ${renderOptions(AI_OPTIONS, get('aiContentAggressiveness'))}
+            </select>
+          </div>
+          <div class="pe-row pe-sub-row pe-input-row">
+            <div class="pe-info">
+              <span class="pe-name">Custom AI Keywords</span>
+              <span class="pe-desc">Comma-separated extra AI terms to match</span>
+            </div>
+            <input id="pe-ai-keywords-input" class="pe-setting-input" type="text" placeholder="e.g. niji, comfyui" value="${escapeAttr(get('aiContentKeywords'))}">
+          </div>
+        </div>
+        <div class="pe-row">
+          <div class="pe-info">
+            <span class="pe-name">Hide by Keywords</span>
+            <span class="pe-desc">Hide any pin whose title/description contains your words</span>
+          </div>
+          <label class="pe-switch">
+            <input type="checkbox" data-key="titleBlockEnabled" data-reload="false" ${get('titleBlockEnabled') ? 'checked' : ''}>
+            <span class="pe-knob"></span>
+          </label>
+        </div>
+        <div id="pe-titleblock-suboptions" style="display:${get('titleBlockEnabled') ? 'block' : 'none'}">
+          <div class="pe-row pe-sub-row pe-input-row">
+            <div class="pe-info">
+              <span class="pe-name">Blocked Words</span>
+              <span class="pe-desc">Comma-separated; matched against the pin title</span>
+            </div>
+            <input id="pe-titleblock-keywords-input" class="pe-setting-input" type="text" placeholder="e.g. politics, spoiler" value="${escapeAttr(get('titleBlockKeywords'))}">
+          </div>
+        </div>
         <div class="pe-group">
           <div class="pe-group-header" id="pe-group-declutter-hdr">
             <div class="pe-info">
@@ -4886,6 +5345,38 @@
             ${renderOptions(DARK_MODE_OPTIONS, get('darkMode'))}
           </select>
         </div>
+        <div class="pe-group">
+          <div class="pe-group-header" id="pe-group-stats-hdr">
+            <div class="pe-info">
+              <span class="pe-name">Statistics</span>
+              <span class="pe-desc">All-time totals — each is optional &amp; off by default</span>
+            </div>
+            <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+              <path d="M7 10l5 5 5-5z"/>
+            </svg>
+          </div>
+          <div class="pe-group-body" id="pe-group-stats-body" style="display:none">
+            ${STAT_ITEMS.map(s => `
+              <div class="pe-row pe-sub-row">
+                <div class="pe-info">
+                  <span class="pe-name">${s.label}</span>
+                  <span class="pe-desc">${s.desc}</span>
+                </div>
+                <span class="pe-stat-value" id="pe-stat-val-${s.count}" style="display:${get(s.show) ? 'inline-block' : 'none'}">${Number(get(s.count)) || 0}</span>
+                <label class="pe-switch">
+                  <input type="checkbox" data-key="${s.show}" data-reload="false" ${get(s.show) ? 'checked' : ''}>
+                  <span class="pe-knob"></span>
+                </label>
+              </div>`).join('')}
+            <div class="pe-row pe-sub-row">
+              <div class="pe-info">
+                <span class="pe-name">Reset Statistics</span>
+                <span class="pe-desc">Clear all counters back to zero</span>
+              </div>
+              <button type="button" id="pe-stats-reset" class="pe-stats-reset-btn">Reset</button>
+            </div>
+          </div>
+        </div>
         <div id="pe-notice" style="display:none">
           <span>↺ Reload to apply</span>
           <button id="pe-reload-btn">Reload now</button>
@@ -4957,6 +5448,38 @@
       hideHdr.classList.toggle('pe-group-open', !open);
     });
 
+    // Inline chevron that collapses/expands the Hide AI Content sub-options
+    // independently of the toggle (so they don't permanently take up space).
+    const aiChevron = wrap.querySelector('#pe-ai-chevron');
+    const aiBody    = wrap.querySelector('#pe-ai-suboptions');
+    if (aiChevron && aiBody) {
+      aiChevron.addEventListener('click', e => {
+        e.stopPropagation();
+        const open = aiBody.style.display !== 'none';
+        aiBody.style.display = open ? 'none' : 'block';
+        aiChevron.classList.toggle('pe-inline-chevron-open', !open);
+        aiChevron.setAttribute('aria-expanded', String(!open));
+      });
+    }
+
+    const statsHdr  = wrap.querySelector('#pe-group-stats-hdr');
+    const statsBody = wrap.querySelector('#pe-group-stats-body');
+    if (statsHdr && statsBody) {
+      statsHdr.addEventListener('click', () => {
+        const open = statsBody.style.display !== 'none';
+        statsBody.style.display = open ? 'none' : 'block';
+        statsHdr.classList.toggle('pe-group-open', !open);
+      });
+    }
+
+    const statsReset = wrap.querySelector('#pe-stats-reset');
+    if (statsReset) {
+      statsReset.addEventListener('click', e => {
+        e.stopPropagation();
+        STAT_ITEMS.forEach(s => { set(s.count, 0); updateStatDisplay(s.count); });
+      });
+    }
+
     // Toggle switches
     wrap.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       cb.addEventListener('change', () => {
@@ -4977,12 +5500,29 @@
         if (key === 'declutterShopTheLook') { applyDeclutterToggle(); if (get('declutter')) hideShopTheLookModules(document); }
         if (key === 'declutterSearchAdvisory') applyDeclutterToggle();
         if (key === 'removeVideos') { if (cb.checked) initRemoveVideos(); }
+        if (key === 'titleBlockEnabled') {
+          const body = wrap.querySelector('#pe-titleblock-suboptions');
+          if (body) body.style.display = cb.checked ? 'block' : 'none';
+          refreshContentFilter();
+        }
+        // AI sub-options visibility is controlled by the #pe-ai-chevron, not the toggle.
+        if (key === 'hideAiContent') refreshContentFilter();
+        if (key.startsWith('statShow')) {
+          const item = STAT_ITEMS.find(s => s.show === key);
+          if (item) {
+            const valEl = wrap.querySelector('#pe-stat-val-' + item.count);
+            if (valEl) {
+              valEl.style.display = cb.checked ? 'inline-block' : 'none';
+              if (cb.checked) valEl.textContent = String(Number(get(item.count)) || 0);
+            }
+          }
+        }
         if (key === 'contextMenu') { if (cb.checked) initImageContextMenu(); else stopImageContextMenu(); }
         if (key === 'hideUpdates' || key === 'hideMessages' || key === 'hideShare' || key === 'hideReactButton' || key === 'hideUploadImageButton' || key === 'hideSearchImageButton' || key === 'hideViewLargerButton' || key === 'hideMoreOptionsButton' || key === 'hideReverseImageSearchButton' || key === 'hideCommentButton') {
           applyNavToggles();
           scheduleMobileCloseupActionButtonsRefresh();
         }
-        if (key === 'hideReactionCount' || key === 'hideSearchSuggestions' || key === 'hideCommentEmojiButton' || key === 'hideCommentStickerButton' || key === 'hideCommentPhotoButton') {
+        if (key === 'hideReactionCount' || key === 'hideSearchSuggestions' || key === 'hideCommentEmojiButton' || key === 'hideCommentStickerButton' || key === 'hideCommentPhotoButton' || key === 'hideProactiveOutreach') {
           applyNavToggles();
           scheduleMobileCloseupActionButtonsRefresh();
         }
@@ -5003,9 +5543,36 @@
         const k = sel.dataset.key;
         set(k, sel.value);
         if (k === 'darkMode') applyDarkMode();
+        else if (k === 'aiContentAggressiveness') refreshContentFilter();
         else refreshTranslationFeatures();
       });
     });
+
+    const aiKeywordsInput = wrap.querySelector('#pe-ai-keywords-input');
+    if (aiKeywordsInput) {
+      const saveAiKeywords = debounce(() => {
+        set('aiContentKeywords', aiKeywordsInput.value);
+        refreshContentFilter();
+      }, 350);
+      aiKeywordsInput.addEventListener('input', saveAiKeywords);
+      aiKeywordsInput.addEventListener('change', () => {
+        set('aiContentKeywords', aiKeywordsInput.value);
+        refreshContentFilter();
+      });
+    }
+
+    const titleBlockInput = wrap.querySelector('#pe-titleblock-keywords-input');
+    if (titleBlockInput) {
+      const saveTitleBlock = debounce(() => {
+        set('titleBlockKeywords', titleBlockInput.value);
+        refreshContentFilter();
+      }, 350);
+      titleBlockInput.addEventListener('input', saveTitleBlock);
+      titleBlockInput.addEventListener('change', () => {
+        set('titleBlockKeywords', titleBlockInput.value);
+        refreshContentFilter();
+      });
+    }
 
     const logoInput = wrap.querySelector('#pe-custom-logo-input');
     if (logoInput) {
@@ -5644,6 +6211,8 @@
       body.pe-hide-comments [data-test-id="editor-with-mentions"],
       body.pe-hide-comments #dweb-comment-editor-container,
       body.pe-hide-comments #mweb-comment-editor-container,
+      body.pe-hide-comments [data-test-id="comments-disabled-label"],
+      body.pe-hide-comments [data-testid="closeup-metadata-details-flex"]:has([data-test-id="comments-disabled-label"]),
       body.pe-hide-comments [data-test-id="closeup-metadata-details-divider"] {
         display: none !important;
       }
@@ -5651,6 +6220,11 @@
       body.pe-hide-comment-emoji [data-test-id="inline-comment-composer-container"] [data-test-id="emoji-selector"],
       body.pe-hide-comment-sticker [data-test-id="inline-comment-composer-container"] button[aria-label="Select a sticker"],
       body.pe-hide-comment-photo [data-test-id="inline-comment-composer-container"] button[aria-label="Select a photo"] {
+        display: none !important;
+      }
+
+      /* ──────── Hide "See More Like This" Proactive Outreach Flyout ──────── */
+      body.pe-hide-proactive-outreach [data-test-id="proactive-outreach-flyout"] {
         display: none !important;
       }
 
@@ -5869,6 +6443,30 @@
       .pe-group-header:hover { background: var(--pe-row-hover); }
       .pe-chevron { transition: transform .2s; flex-shrink: 0; color: var(--pe-text-muted); }
       .pe-group-open .pe-chevron { transform: rotate(180deg); }
+      /* Inline chevron next to a toggle (e.g. Hide AI Content options) */
+      .pe-inline-chevron {
+        display: inline-flex; align-items: center; justify-content: center;
+        background: none; border: none; padding: 4px; margin: 0;
+        cursor: pointer; color: var(--pe-text-muted); flex-shrink: 0;
+        border-radius: 6px; transition: background .12s;
+      }
+      .pe-inline-chevron:hover { background: var(--pe-row-hover); }
+      .pe-inline-chevron .pe-chevron { display: block; }
+      .pe-inline-chevron-open .pe-chevron { transform: rotate(180deg); }
+      /* Statistics counters */
+      .pe-stat-value {
+        font-weight: 700; font-size: 12px; color: var(--pe-accent);
+        font-variant-numeric: tabular-nums; flex-shrink: 0;
+        min-width: 28px; text-align: right;
+      }
+      .pe-stats-reset-btn {
+        flex-shrink: 0; cursor: pointer;
+        background: var(--pe-surface); color: var(--pe-text);
+        border: 1px solid var(--pe-border); border-radius: 6px;
+        padding: 3px 10px; font-size: 11px; font-weight: 600;
+        transition: background .12s;
+      }
+      .pe-stats-reset-btn:hover { background: var(--pe-row-hover); }
       #pe-group-hide-body {
         max-height: min(42dvh, 320px);
         overflow-y: auto;
@@ -6498,6 +7096,9 @@
 
     // Hide shop posts
     safeInit('hideShopPosts', initHideShopPosts);
+
+    // Content filter (AI pins + title keyword blocklist)
+    safeInit('contentFilter', initContentFilter);
 
     // Hide comments
     safeInit('hideComments', initHideComments);

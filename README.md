@@ -4,9 +4,9 @@
 
 # Pinterest Power Menu
 
-**The all-in-one userscript that makes Pinterest actually good.**
+**An all-in-one userscript that makes Pinterest actually good.**
 
-[![Version](https://img.shields.io/badge/Version-v1.4.0-red?style=flat-square)](https://github.com/Angel2mp3)
+[![Version](https://img.shields.io/badge/Version-v1.5.0-red?style=flat-square)](https://github.com/Angel2mp3)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![Installs](https://img.shields.io/endpoint?url=https%3A%2F%2Fuserscript-install-tracker.vercel.app%2Fapi%2Fbadge%3Frepo%3DPinterestPowerMenu&style=flat-square)](https://github.com/Angel2mp3/Pinterest-Power-Menu)
 [![FMHY](https://img.shields.io/badge/Featured%20on-FMHY-purple?style=flat-square)](https://fmhy.net/social-media-tools#social-media-tools)
@@ -29,13 +29,12 @@
 
 ## 📌 Overview
 
-Pinterest Power Menu adds the Pinterest features that should have been there already. It improves image quality, fixes downloads, adds one-click image and video downloading, supports reverse image search, translates visible text, fixes awkward media sizing, and gives you toggles to hide the Pinterest clutter you do not want.
+Pinterest Power Menu adds the Pinterest features that should have been there already. It improves image quality, fixes downloads, adds one-click image and video downloading, supports reverse image search, translates visible text, fixes awkward media sizing, filters AI-generated content, and gives you toggles to hide the Pinterest clutter you do not want.
 
 Most features work on the mobile Pinterest website too. A few are desktop-only, like the right-click image menu and custom logo controls, because they depend on desktop layout or mouse behavior.
 
 ## ✨ Features
-#### Most of these features are supported for the mobile website version!               
-#### There are also known issues with the quick download for videos on mobile, refreshing the page and trying again tends to fix it**
+#### Most of these features are supported for the mobile website version!
 
 ### ⭐ Feature Highlights
 
@@ -52,8 +51,11 @@ Most features work on the mobile Pinterest website too. A few are desktop-only, 
 - Loop closeup videos so they auto-replay instead of showing "Watch again"
 - Optional video-pin removal
 - Declutter tools for sponsored, shopping, product, support, and suggestion modules
+- **Hide AI Content** — filter AI-generated pins with Conservative / Balanced / Aggressive detection tiers and custom keywords
+- **Hide by Keywords** — block pins whose title or auto-label matches a word list you define
 - Custom Pinterest logo replacement on desktop
-- Hide controls for action buttons, comments, reactions, share sheets, search suggestions, and composer tools
+- Hide controls for action buttons, comments, reactions, share sheets, search suggestions, composer tools, and proactive outreach popups
+- **Statistics** — optional all-time counters for ads blocked, AI content blocked, images/videos downloaded, and comments translated
 - Lightweight update notice with a permanent opt-out
 
 ---
@@ -153,6 +155,28 @@ Translation uses Google's unofficial `translate.googleapis.com/translate_a/singl
 
 ---
 
+## 🤖 Hide AI Content
+
+The Hide AI Content toggle filters AI-generated pins from feeds. Detection is heuristic — the script inspects pin titles, alt text, descriptions, and Pinterest's own AI disclosure labels rather than analyzing image pixels.
+
+| Tier | What it matches |
+|---|---|
+| Conservative | Pinterest's own AI labels and explicit `#aigenerated` / "ai generated" text |
+| Balanced | Conservative + common tool names (Midjourney, DALL-E, Stable Diffusion, "ai art") |
+| Aggressive | Balanced + loose "ai" tokens and prompt-like phrasing |
+
+A **custom keywords** field lets you add comma-separated words that augment the selected tier. Any pin whose title or auto-label contains one of your keywords is also hidden.
+
+---
+
+## 🔡 Hide by Keywords
+
+Hide by Keywords lets you block pins by words in their title or auto-generated alt label. Enter a comma-separated list in the keyword field — any pin whose title or aria-label contains a match is hidden from feeds and search.
+
+This filter runs on the same observer as Hide AI Content, so both can be active at once without extra overhead.
+
+---
+
 ## 🧹 Declutter
 
 The Declutter group is enabled by default. It removes or collapses noisy Pinterest modules without leaving huge empty gaps where possible.
@@ -209,6 +233,7 @@ The Hide UI Elements group lets you remove smaller Pinterest controls independen
 | Hide Comment Emoji Button | The emoji picker in the comment composer |
 | Hide Comment Sticker Button | The sticker picker in the comment composer |
 | Hide Comment Photo Button | The photo picker in the comment composer |
+| Hide "See More Like This" Popup | The proactive outreach flyout that appears over pins asking "See more like this?" |
 
 The hide rules target known Pinterest areas so they do not wipe out unrelated mobile layouts.
 
@@ -230,6 +255,24 @@ This option is hidden on mobile because the logo replacement is desktop-only.
 
 ---
 
+## 📊 Statistics
+
+The Statistics group keeps optional all-time counters of what the script has done for you. It sits at the bottom of the settings panel and is collapsed by default.
+
+Each counter is opt-in and off by default. Turning a counter on both starts counting and reveals its running total; turning it off stops counting. Nothing is tracked until you enable it.
+
+| Counter | What it counts |
+|---|---|
+| Ads Blocked | Sponsored / promoted pins removed by Declutter |
+| AI Content Blocked | Likely AI-generated pins hidden by Hide AI Content |
+| Images Downloaded | Image files saved by the script |
+| Videos Downloaded | Video files saved by the script |
+| Comments Translated | Comments auto-translated |
+
+Totals are cumulative across sessions and saved like your other settings. A **Reset** button clears every counter back to zero.
+
+---
+
 ## ⚙️ Settings Panel
 
 Click the gear button in the bottom-right corner of Pinterest to open Pinterest Power Menu settings.
@@ -241,6 +284,7 @@ Settings are grouped into:
 - Translate
 - Customize
 - Hide UI Elements
+- Statistics
 
 There's also a Dark Mode dropdown (Auto / Light / Dark) that controls the appearance of the settings panel and the floating gear button.
 
@@ -267,6 +311,14 @@ Manual install:
 
 ---
 
+## 🧭 Usage
+
+After installation, visit Pinterest and open the gear button in the bottom-right corner. Most options apply immediately, so you can turn downloads, declutter tools, translation, reverse image search, and UI hiding on or off without reloading.
+
+Reverse image search and download buttons appear on supported pins, closeups, and media surfaces when their settings are enabled. If Pinterest changes its layout, refresh the page first, then check the troubleshooting notes below.
+
+---
+
 ## 🔐 Privacy And Security
 
 - The script only runs on Pinterest pages matched by the userscript metadata.
@@ -274,6 +326,23 @@ Manual install:
 - Download and media features may request Pinterest-hosted media with `GM_xmlhttpRequest` so files can be saved at the best available quality.
 - Reverse image search opens the selected provider with the current image URL; some providers may receive that image URL when you choose them.
 - The script does not ask for passwords, API keys, tokens, cookies, or extra accounts beyond your normal Pinterest session.
+
+---
+
+## 🧪 Testing
+
+Run the local smoke test with Node.js:
+
+```bash
+node tests/userscript-feature-smoke.test.js
+```
+
+Optional syntax checks:
+
+```bash
+node --check PinterestPowerMenu.user.js
+node --check tests/userscript-feature-smoke.test.js
+```
 
 ---
 

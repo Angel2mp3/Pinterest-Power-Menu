@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pinterest Power Menu
 // @description  All-in-one Pinterest power tool: original quality, download fixer, closeup image/video downloads, visible text translation, GIF hover/auto-play, remove videos, hide UI elements, declutter, AI content filter
-// @version      1.5.0
+// @version      1.8.0
 // @author       Angel
 // @namespace    https://github.com/Angel2mp3
 // @homepageURL  https://angelmakes.software
@@ -26,12 +26,15 @@
   //  SETTINGS
   // ═══════════════════════════════════════════════════════════════════
   const SETTINGS_KEY = 'pe_settings_v1';
-  const SCRIPT_VERSION = '1.5.0';
+  const SCRIPT_VERSION = '1.8.0';
   const UPDATE_NOTES_HIGHLIGHTS = [
-    'Hide AI Content — filter AI-generated pins with Conservative / Balanced / Aggressive tiers and custom keywords.',
-    'Hide by Keywords — block pins by title or auto-label keywords.',
-    'Hide "See More Like This" popup — removes the proactive outreach flyout that appears over pins.',
-    'New Hide UI Elements toggles: comment emoji, sticker, photo pickers, and more.',
+    'Version 1.8.0',
+    'Hide Pin button + native "More options" menu entry',
+    'Comment Keyword Blocker',
+    'Reworked solid-color Background Theme (Beta)',
+    'Custom Nav Button Images (desktop)',
+    'Real ZIP board downloads + "Download New" modes',
+    'Backup & Restore, and a settings menu cleanup pass',
   ];
 
   // ── Mobile / touch detection ─────────────────────────────────────────
@@ -48,11 +51,15 @@
   const DEFAULTS = {
     originalQuality:  true,
     downloadFixer:    true,
+    filenameStrategy:      'title',  // grid + closeup single-pin downloads
+    boardFilenameStrategy: 'title',  // board downloader batch
+    boardDownloadTrack:   false,     // opt-in: remember which pins were downloaded per board
+    convertWebpToPng: false,         // re-encode WebP image downloads as PNG before saving
     gifHover:         true,
-    hideVisitSite:    true,
+    hideVisitSite:    false,
     boardDownloader:  true,
     declutter:        true,
-    declutterShopTheLook: true,
+    declutterShopTheLook: false,
     declutterSearchAdvisory: false,
     contextMenu:      !IS_MOBILE,  // mouse-only feature; off by default on mobile
     hideUpdates:      false,
@@ -61,7 +68,6 @@
     gifAutoPlay:      false,
     videoAutoPlay:    false,
     infiniteLoopVideo: false,
-    darkMode:         'auto',
     removeVideos:     false,
     hideShopPosts:    false,
     hideAiContent:    false,
@@ -83,7 +89,8 @@
     hideCommentStickerButton: false,
     hideCommentPhotoButton: false,
     hideProactiveOutreach: false,
-    autoTranslate:    false,
+    commentBlockEnabled: false,            // hide comments that contain listed phrases
+    commentBlockKeywords: '',              // comma-separated phrases
     autoTranslateTitles: false,
     autoTranslateDescriptions: false,
     autoTranslateComments: false,
@@ -93,9 +100,23 @@
     customPinterestLogoUrl: '',
     customPinterestLogoSize: 32,
     customPinterestLogoCircle: true,
+    // Per-button custom images. Keyed by NAV_BUTTONS id ->
+    // { url:'', size:32, circle:true }. Nested so adding buttons doesn't bloat
+    // DEFAULTS; loadCfg/get/set serialize the whole config so no extra plumbing.
+    customNavImages: {},
+    // Custom site background / theme (solid color only, experimental / beta).
+    themeEnabled: false,     // master switch; off by default
+    themePreset: 'default',  // 'default' | THEME_PRESETS id
+    themeColor: '#0f2027', // solid hex color used when theme is enabled
     reverseImageSearchButton: true,
     updateNotesDisabled: false,
     lastUpdateNotesVersion: '',
+    // Debug logging toggle (off by default).
+    debugLogging: false,
+    // Hide specific pins by their numeric pin ID.
+    hideByPinIdEnabled: false,
+    // Hide pins the user has already opened/viewed.
+    hideSeenPins: false,
     // All-time statistics. Each stat is opt-in (off by default); counting only
     // happens while its show flag is on. Counts are cumulative across sessions.
     statShowAdsBlocked: false,
@@ -146,6 +167,14 @@
       if (saved.hideComments === true && saved.hideCommentButton === undefined) _cfg.hideCommentButton = true;
       if (saved.autoTranslateTarget === undefined) _cfg.autoTranslateTarget = DEFAULTS.autoTranslateTarget;
       if (saved.autoTranslateCommentMode === undefined) _cfg.autoTranslateCommentMode = DEFAULTS.autoTranslateCommentMode;
+      // The old "Keep Visit Site Button" / "Hide Visit Site Button" declutter-scoped
+      // toggles were folded into the global "Hide Visit Site" setting; drop the old keys.
+      if (Object.prototype.hasOwnProperty.call(saved, 'declutterKeepVisitSite') ||
+          Object.prototype.hasOwnProperty.call(saved, 'declutterHideVisitSite')) {
+        delete _cfg.declutterKeepVisitSite;
+        delete _cfg.declutterHideVisitSite;
+        saveCfg();
+      }
       _cfg.showManualTranslateButtons = false;
       rememberMissingDefaultPrefs(saved);
     } catch (_) {
@@ -155,6 +184,66 @@
 
   function saveCfg() {
     try { storageWrite(SETTINGS_KEY, JSON.stringify(_cfg)); } catch (_) {}
+  }
+
+  // Export / import a JSON backup of settings, hidden pin IDs, and board history.
+  // Useful when a userscript engine or iOS WebView does not persist GM_/localStorage
+  // data across launches.
+  function exportPowerMenuData() {
+    loadCfg();
+    return {
+      version: SCRIPT_VERSION,
+      exportedAt: new Date().toISOString(),
+      settings: { ..._cfg },
+      hiddenPinIds: [...getHiddenPinIds()],
+      boardHistory: getBoardHistory(),
+    };
+  }
+
+  function importPowerMenuData(jsonString, { merge = false } = {}) {
+    let data;
+    try {
+      data = JSON.parse(jsonString);
+    } catch (e) {
+      return { success: false, error: 'Invalid JSON: ' + e.message };
+    }
+    if (!data || typeof data !== 'object') {
+      return { success: false, error: 'Backup file is not a JSON object.' };
+    }
+    if (!data.settings || typeof data.settings !== 'object') {
+      return { success: false, error: 'Backup file does not contain settings.' };
+    }
+    if (data.version && typeof data.version !== 'string') {
+      return { success: false, error: 'Backup version is not a string.' };
+    }
+
+    if (merge) {
+      _cfg = { ...DEFAULTS, ..._cfg, ...data.settings };
+    } else {
+      _cfg = { ...DEFAULTS, ...data.settings };
+    }
+    saveCfg();
+
+    if (Array.isArray(data.hiddenPinIds)) {
+      const existing = merge ? getHiddenPinIds() : new Set();
+      data.hiddenPinIds.forEach(id => existing.add(String(id)));
+      saveHiddenPinIds(existing);
+    }
+
+    if (data.boardHistory && typeof data.boardHistory === 'object' && !Array.isArray(data.boardHistory)) {
+      const existing = merge ? getBoardHistory() : {};
+      const merged = { ...existing, ...data.boardHistory };
+      storageWrite(BOARD_HISTORY_KEY, JSON.stringify(merged));
+    }
+
+    return {
+      success: true,
+      imported: {
+        settings: true,
+        hiddenPinIds: Array.isArray(data.hiddenPinIds),
+        boardHistory: !!(data.boardHistory && typeof data.boardHistory === 'object' && !Array.isArray(data.boardHistory)),
+      },
+    };
   }
 
   function rememberMissingDefaultPrefs(saved) {
@@ -178,11 +267,35 @@
     saveCfg();
   }
 
+  // Debug logging helper. Only emits when the debugLogging setting is enabled.
+  function debugLog(level, ...args) {
+    if (!get('debugLogging')) return;
+    const fn = console[level] || console.log;
+    try { fn('[Pinterest Power Menu]', ...args); } catch (_) {}
+  }
+
   // ── All-time statistics counters ──────────────────────────────────
   // Updates the live count shown in the settings panel, if it's open.
+  // Keep the counter cell compact at high counts: commas under 100k, then a
+  // compact "12.3K" / "1.2M" form so the row never grows or wraps. The exact
+  // number is preserved in the element's title.
+  function formatStatCount(n) {
+    const num = Number(n) || 0;
+    if (num < 100000) return num.toLocaleString();
+    try {
+      return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(num);
+    } catch (_) {
+      return String(num);
+    }
+  }
+
   function updateStatDisplay(countKey) {
     const el = document.getElementById('pe-stat-val-' + countKey);
-    if (el) el.textContent = String(Number(get(countKey)) || 0);
+    if (el) {
+      const num = Number(get(countKey)) || 0;
+      el.textContent = formatStatCount(num);
+      el.title = num.toLocaleString();
+    }
   }
 
   // Increment a counter only while its stat is enabled. Persistence is
@@ -196,6 +309,15 @@
     updateStatDisplay(countKey);
     clearTimeout(_statsSaveTimer);
     _statsSaveTimer = setTimeout(saveCfg, 1000);
+  }
+
+  // Flush any pending stat save immediately so counts are not lost when the
+  // user closes or background the tab.
+  function flushPendingStats() {
+    if (!_statsSaveTimer) return;
+    clearTimeout(_statsSaveTimer);
+    _statsSaveTimer = null;
+    saveCfg();
   }
 
   function shouldShowUpdateNotes() {
@@ -251,13 +373,7 @@
     layer.querySelector('#pe-update-notes-never')?.addEventListener('click', disableUpdateNotesForever);
     document.body.appendChild(layer);
 
-    try {
-      const mode = get('darkMode');
-      let dark = false;
-      if (mode === 'dark') dark = true;
-      else if (mode === 'auto' && typeof isPinterestDarkTheme === 'function') dark = isPinterestDarkTheme();
-      layer.querySelector('#pe-update-notes-card')?.classList.toggle('pe-dark', dark);
-    } catch (_) {}
+    layer.querySelector('#pe-update-notes-card')?.classList.add('pe-dark');
   }
 
   loadCfg();
@@ -303,20 +419,6 @@
       }
       html.pe-declutter-enabled.pe-declutter-advisory-enabled [data-test-id="search-advisory"],
       html.pe-declutter-enabled.pe-declutter-advisory-enabled [data-test-id="fresh-search-advisory"] {
-        height: 0 !important;
-        width: 0 !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        border: none !important;
-        overflow: hidden !important;
-        opacity: 0 !important;
-        min-height: 0 !important;
-        min-width: 0 !important;
-        pointer-events: none !important;
-      }
-      html.pe-declutter-enabled [data-test-id="pin-action-bar-container"]:has([data-test-id="visit-button-mobile-inline"]),
-      html.pe-declutter-enabled [data-test-id="visit-button-mobile-inline"],
-      html.pe-declutter-enabled [data-test-id="main-pin-section-visit-button"] {
         height: 0 !important;
         width: 0 !important;
         margin: 0 !important;
@@ -404,6 +506,16 @@
     return function () { clearTimeout(t); t = setTimeout(fn, ms); };
   }
 
+  // Yield to the browser's event loop. Uses the modern scheduler.yield() when
+  // available; otherwise falls back to a zero-timeout so long tasks can break
+  // up their work without blocking scroll / paint.
+  function schedulerYield() {
+    if (typeof scheduler !== 'undefined' && typeof scheduler.yield === 'function') {
+      return scheduler.yield();
+    }
+    return new Promise(resolve => setTimeout(resolve, 0));
+  }
+
   function isPowerMenuNode(node) {
     if (!node || node.nodeType !== 1) return false;
     return !!node.closest?.(
@@ -425,6 +537,100 @@
     });
   }
 
+  // Development aid: warn when brittle obfuscated-class selectors no longer
+  // match anything. These classes change every Pinterest deploy, so a zero-match
+  // is a strong signal that a hide rule needs updating.
+  const _BRITTLE_SELECTORS = [
+    { sel: 'body.pe-hide-share .WuRgKB', setting: 'hideShare' },
+    { sel: 'body.pe-hide-share .H2DtUH', setting: 'hideShare' },
+    { sel: 'body.pe-hide-share .BVzdUh.Nt6yCq.i1hWBD', setting: 'hideShare' },
+    { sel: 'body.pe-hide-share .oRZ5_s', setting: 'hideShare' },
+    { sel: 'body.pe-hide-react .oRZ5_s', setting: 'hideReactButton' },
+    { sel: 'body.pe-hide-search-suggestions .oRZ5_s', setting: 'hideSearchSuggestions' },
+    { sel: 'body.pe-hide-more-options .oRZ5_s', setting: 'hideMoreOptionsButton' },
+    { sel: 'body.pe-hide-comment-button .oRZ5_s', setting: 'hideCommentButton' },
+    { sel: '.PinCard__imageWrapper', setting: 'boardDownloader' },
+  ];
+  function checkSelectorHealth() {
+    if (!document.querySelectorAll) return;
+    _BRITTLE_SELECTORS.forEach(({ sel, setting }) => {
+      if (!get(setting)) return;
+      try {
+        if (document.querySelectorAll(sel).length === 0) {
+          debugLog('warn', 'Selector matched zero elements (may need update):', sel);
+        }
+      } catch (_) {}
+    });
+    learnActionBarClasses();
+    debugLog('log', 'Action-bar slot class learned:', _learnedActionSlotClass || '(not yet learned)');
+  }
+
+  // Shared mutation bus: one observer on document.documentElement notifies all
+  // subscribers. This avoids the cost of running many independent observers.
+  const _sharedMutationSubscribers = [];
+  let _sharedMutationObs = null;
+  function subscribeSharedMutations(callback) {
+    if (!_sharedMutationObs) {
+      _sharedMutationObs = new MutationObserver(records => {
+        if (hasOnlyPowerMenuMutations(records)) return;
+        _sharedMutationSubscribers.slice().forEach(cb => {
+          try { cb(records); } catch (_) {}
+        });
+      });
+      _sharedMutationObs.observe(document.documentElement, { childList: true, subtree: true });
+      registerObserver('sharedMutationBus', _sharedMutationObs, { target: document.documentElement, persistent: true });
+    }
+    _sharedMutationSubscribers.push(callback);
+    return () => {
+      const idx = _sharedMutationSubscribers.indexOf(callback);
+      if (idx !== -1) _sharedMutationSubscribers.splice(idx, 1);
+    };
+  }
+
+  // Observer registry: track every MutationObserver so SPA navigation can
+  // disconnect per-route observers and recreate them cleanly. Persistent
+  // observers (shared bus, original quality) survive navigation.
+  const _observerRegistry = new Map();
+  function registerObserver(name, observer, options = {}) {
+    const { target = null, persistent = false } = options;
+    const existing = _observerRegistry.get(name);
+    if (existing && existing.observer !== observer) {
+      try { existing.observer.disconnect(); } catch (_) {}
+    }
+    _observerRegistry.set(name, { observer, target, persistent });
+    return observer;
+  }
+  function unregisterObserver(name) {
+    const entry = _observerRegistry.get(name);
+    if (!entry) return;
+    try { entry.observer.disconnect(); } catch (_) {}
+    _observerRegistry.delete(name);
+  }
+  function hasObserver(name) {
+    const entry = _observerRegistry.get(name);
+    return !!(entry && entry.observer);
+  }
+  function isObserverConnected(name) {
+    const entry = _observerRegistry.get(name);
+    if (!entry || !entry.observer) return false;
+    // MutationObserver has no isConnected; we approximate by checking whether
+    // the observed target is still in the document and the observer is in the map.
+    return true;
+  }
+  function disconnectObservers({ persistent = false } = {}) {
+    for (const [name, entry] of _observerRegistry) {
+      if (entry.persistent && !persistent) continue;
+      try { entry.observer.disconnect(); } catch (_) {}
+      _observerRegistry.delete(name);
+    }
+  }
+  function disconnectAllOnNavigation() {
+    disconnectObservers({ persistent: false });
+    if (get('debugLogging')) {
+      debugLog('log', 'Observers after navigation cleanup:', [..._observerRegistry.keys()]);
+    }
+  }
+
 
   // ═══════════════════════════════════════════════════════════════════
   //  MODULE: ORIGINAL QUALITY  (fast – no probe, no popup)
@@ -435,19 +641,39 @@
 
   const OQ_RE = /^(https?:\/\/i\.pinimg\.com)\/\d+x(\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{32}\.(?:jpg|jpeg|png|gif|webp))$/i;
 
+  // Build a list of /originals/ URLs to try for a sized thumbnail path.
+  // Pinterest sometimes stores the original as PNG/WebP even though the
+  // thumbnail URL ends in .jpg, so we try the original extension first,
+  // then PNG, then WebP, before falling back to the sized thumbnail.
+  function pinimgOriginalCandidates(base, path) {
+    const currentExt = (path.match(/\.(jpg|jpeg|png|gif|webp)$/i)?.[1] || 'jpg').toLowerCase();
+    const exts = new Set([currentExt === 'jpeg' ? 'jpg' : currentExt, 'png', 'webp', 'jpg']);
+    const candidates = [];
+    exts.forEach(ext => {
+      if (ext === 'jpeg') ext = 'jpg';
+      candidates.push(base + '/originals' + path.replace(/\.[^.]+$/, '.' + ext));
+    });
+    candidates.push(base + '/736x' + path);
+    return candidates.filter((u, i, a) => a.indexOf(u) === i);
+  }
+
   function upgradeImg(img) {
     if (!get('originalQuality')) return;
     if (img.__peOQ || img.tagName !== 'IMG' || !img.src) return;
     const m = img.src.match(OQ_RE);
     if (!m) return;
     img.__peOQ = true;
-    const origSrc = m[1] + '/originals' + m[2];
-    const fallSrc = m[1] + '/736x'      + m[2];
+    const candidates = pinimgOriginalCandidates(m[1], m[2]);
+    img.__peOQCandidates = candidates;
+    img.__peOQIdx = 0;
     img.onerror = function () {
-      if (img.src === origSrc) { img.onerror = null; img.src = fallSrc; }
+      let next = (img.__peOQIdx || 0) + 1;
+      if (next >= candidates.length) { img.onerror = null; return; }
+      img.__peOQIdx = next;
+      img.src = candidates[next];
     };
-    if (img.getAttribute('data-src') === img.src) img.setAttribute('data-src', origSrc);
-    img.src = origSrc;
+    if (img.getAttribute('data-src') === img.src) img.setAttribute('data-src', candidates[0]);
+    img.src = candidates[0];
   }
 
   function scanOQ(node) {
@@ -458,23 +684,41 @@
 
   // Start MutationObserver immediately (document-start) so we catch
   // images before they fire their first load event.
-  const oqObs = new MutationObserver(records => {
+  const oqObs = new MutationObserver(async records => {
     if (!get('originalQuality')) return;
-    const process = () => records.forEach(r => {
+    // On mobile, batch-process records and yield between chunks so long feeds
+    // don't jank scroll / paint. Desktop keeps the synchronous fast path.
+    if (IS_MOBILE) {
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(async () => {
+          for (let i = 0; i < records.length; i++) {
+            const r = records[i];
+            if (r.attributeName === 'src') upgradeImg(r.target);
+            else r.addedNodes.forEach(scanOQ);
+            if (i % 4 === 3) await schedulerYield();
+          }
+        }, { timeout: 300 });
+      } else {
+        await schedulerYield();
+        for (let i = 0; i < records.length; i++) {
+          const r = records[i];
+          if (r.attributeName === 'src') upgradeImg(r.target);
+          else r.addedNodes.forEach(scanOQ);
+          if (i % 4 === 3) await schedulerYield();
+        }
+      }
+      return;
+    }
+    records.forEach(r => {
       if (r.attributeName === 'src') upgradeImg(r.target);
       else r.addedNodes.forEach(scanOQ);
     });
-    // On mobile, yield to the browser's render pipeline so scroll stays smooth
-    if (IS_MOBILE && typeof requestIdleCallback === 'function') {
-      requestIdleCallback(process, { timeout: 300 });
-    } else {
-      process();
-    }
   });
   oqObs.observe(document.documentElement, {
     childList: true, subtree: true,
     attributes: true, attributeFilter: ['src'],
   });
+  registerObserver('originalQuality', oqObs, { target: document.documentElement, persistent: true });
 
 
   // ═══════════════════════════════════════════════════════════════════
@@ -509,11 +753,12 @@
   }
 
   // Physically removes the Messages nav button from the DOM (not just hidden with CSS).
-  // A MutationObserver re-removes it whenever Pinterest re-renders the nav (SPA navigation).
-  let _messagesRemoverObs = null;
+  // Subscribes to the shared mutation bus so it re-removes whenever Pinterest
+  // re-renders the nav (SPA navigation).
+  let _messagesRemoverUnsub = null;
   function initMessagesRemover() {
     if (!get('hideMessages')) return;
-    if (_messagesRemoverObs) return; // already running
+    if (_messagesRemoverUnsub) return; // already running
     const SELS = [
       'div[aria-label="Messages"]',
       '[data-test-id="nav-bar-speech-ellipsis"]',
@@ -524,17 +769,20 @@
       });
     }
     removeNow(document);
-    _messagesRemoverObs = new MutationObserver(recs => {
-      if (hasOnlyPowerMenuMutations(recs)) return;
-      if (!get('hideMessages')) { _messagesRemoverObs.disconnect(); _messagesRemoverObs = null; return; }
+    _messagesRemoverUnsub = subscribeSharedMutations(recs => {
+      if (!get('hideMessages')) {
+        if (_messagesRemoverUnsub) { _messagesRemoverUnsub(); _messagesRemoverUnsub = null; }
+        return;
+      }
       recs.forEach(r => r.addedNodes.forEach(n => { if (n.nodeType === 1) removeNow(n); }));
     });
-    _messagesRemoverObs.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   // JS-based "Visit site" link removal – catches links that CSS alone misses
   // (e.g. <a rel="nofollow"><div>Visit site</div></a>)
+  let _visitSiteHiderUnsub = null;
   function initVisitSiteHider() {
+    if (_visitSiteHiderUnsub) return;
     function hideInTree(root) {
       if (!get('hideVisitSite') || !root) return;
       const links = root.querySelectorAll ? root.querySelectorAll('a') : [];
@@ -548,13 +796,15 @@
       });
     }
     hideInTree(document);
-    new MutationObserver(recs => {
-      if (hasOnlyPowerMenuMutations(recs)) return;
+    _visitSiteHiderUnsub = subscribeSharedMutations(recs => {
       if (!get('hideVisitSite')) return;
       recs.forEach(r => r.addedNodes.forEach(n => {
         if (n.nodeType === 1) hideInTree(n);
       }));
-    }).observe(document.documentElement, { childList: true, subtree: true });
+    });
+  }
+  function stopVisitSiteHider() {
+    if (_visitSiteHiderUnsub) { _visitSiteHiderUnsub(); _visitSiteHiderUnsub = null; }
   }
 
 
@@ -567,9 +817,18 @@
   // Also intercepts "Copy link" and clicks on the URL input box.
 
   function initShareOverride() {
-    const nativeSetter = Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype, 'value'
-    ).set;
+    // Some userscript sandboxes restrict access to native prototype descriptors.
+    // Fall back to direct property assignment if the native setter is unavailable.
+    function setInputValue(input, value) {
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        if (descriptor && typeof descriptor.set === 'function') {
+          descriptor.set.call(input, value);
+          return;
+        }
+      } catch (_) {}
+      input.value = value;
+    }
 
     let _sharePinUrl = null;
 
@@ -616,7 +875,7 @@
       ).forEach(input => {
         // Always re-fix if value doesn't match
         if (input.value !== realUrl) {
-          nativeSetter.call(input, realUrl);
+          setInputValue(input, realUrl);
           input.dispatchEvent(new Event('input', { bubbles: true }));
         }
         if (!input.__peShareClick) {
@@ -639,7 +898,7 @@
           new MutationObserver(() => {
             const url = _sharePinUrl || location.href;
             if (input.value !== url) {
-              nativeSetter.call(input, url);
+              setInputValue(input, url);
               input.dispatchEvent(new Event('input', { bubbles: true }));
             }
           }).observe(input, { attributes: true, attributeFilter: ['value'] });
@@ -647,11 +906,12 @@
       });
     }
 
-    new MutationObserver(records => {
+    const shareOverrideObs = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
       fixShareInputs();
-    })
-      .observe(document.documentElement, { childList: true, subtree: true });
+    });
+    shareOverrideObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('shareOverride', shareOverrideObs, { target: document.documentElement });
 
     // 3) Intercept "Copy link" button clicks
     document.addEventListener('click', e => {
@@ -894,14 +1154,16 @@
     kill(); setTimeout(kill, 60); setTimeout(kill, 250);
   }
 
-  new MutationObserver(records => {
+  const videoPauseObs = new MutationObserver(records => {
     if (hasOnlyPowerMenuMutations(records)) return;
     records.forEach(r => r.addedNodes.forEach(function scan(n) {
       if (!n || n.nodeType !== 1) return;
       if (n.tagName === 'VIDEO') pauseVidOnAdd(n);
       n.querySelectorAll && n.querySelectorAll('video').forEach(pauseVidOnAdd);
     }));
-  }).observe(document.documentElement, { childList: true, subtree: true });
+  });
+  videoPauseObs.observe(document.documentElement, { childList: true, subtree: true });
+  registerObserver('videoPause', videoPauseObs, { target: document.documentElement });
 
   function initGifHover() {
     document.addEventListener('mouseover', e => {
@@ -1079,7 +1341,7 @@
   }
 
   function initGifAutoPlay() {
-    if (_gifAutoIO) return;
+    if (hasObserver('gifAutoIO')) return;
     _gifAutoIO = new IntersectionObserver(entries => {
       // Skip when feature is off or tab is hidden (avoids playing on inactive tabs)
       if (!get('gifAutoPlay') || document.hidden) return;
@@ -1088,6 +1350,7 @@
         else                      stopGifInView(entry.target);
       });
     }, { threshold: 0.1 });
+    registerObserver('gifAutoIO', _gifAutoIO);
 
     observeGifPins();
     _gifAutoMO = new MutationObserver(records => {
@@ -1097,11 +1360,14 @@
       }));
     });
     _gifAutoMO.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('gifAutoMO', _gifAutoMO, { target: document.documentElement });
   }
 
   function stopGifAutoPlay() {
     if (_gifAutoIO) { _gifAutoIO.disconnect(); _gifAutoIO = null; }
     if (_gifAutoMO) { _gifAutoMO.disconnect(); _gifAutoMO = null; }
+    unregisterObserver('gifAutoIO');
+    unregisterObserver('gifAutoMO');
     document.querySelectorAll(GIF_PIN_CONTAINER_SEL).forEach(wrapper => {
       stopGifInView(wrapper);
       wrapper.__peAutoObs = false;
@@ -1193,7 +1459,7 @@
   }
 
   function initVideoAutoPlay() {
-    if (_vidAutoIO) return;
+    if (hasObserver('vidAutoIO')) return;
     _vidAutoIO = new IntersectionObserver(entries => {
       if (!get('videoAutoPlay')) return;
       entries.forEach(entry => {
@@ -1206,6 +1472,7 @@
         }
       });
     }, { threshold: 0.25 });
+    registerObserver('vidAutoIO', _vidAutoIO);
 
     observeVideos();
     _vidAutoMO = new MutationObserver(records => {
@@ -1215,11 +1482,14 @@
       }));
     });
     _vidAutoMO.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('vidAutoMO', _vidAutoMO, { target: document.documentElement });
   }
 
   function stopVideoAutoPlay() {
     if (_vidAutoIO) { _vidAutoIO.disconnect(); _vidAutoIO = null; }
     if (_vidAutoMO) { _vidAutoMO.disconnect(); _vidAutoMO = null; }
+    unregisterObserver('vidAutoIO');
+    unregisterObserver('vidAutoMO');
     _vidAutoPending.clear();
     document.querySelectorAll('video').forEach(v => {
       stopVidInView(v);
@@ -1335,7 +1605,7 @@
   function initInfiniteLoopVideo() {
     applyLoopFlagToAllVideos();
     bindLoopEndedFallback();
-    if (_loopVideoObs) return;
+    if (hasObserver('loopVideo')) return;
     _loopVideoObs = new MutationObserver(records => {
       for (const r of records) {
         for (const n of r.addedNodes) {
@@ -1346,10 +1616,12 @@
       }
     });
     _loopVideoObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('loopVideo', _loopVideoObs, { target: document.documentElement });
   }
 
   function stopInfiniteLoopVideo() {
     if (_loopVideoObs) { _loopVideoObs.disconnect(); _loopVideoObs = null; }
+    unregisterObserver('loopVideo');
     _loopVideoOriginalState.forEach((wasLooping, v) => {
       try { v.loop = wasLooping; } catch (_) {}
     });
@@ -1472,27 +1744,6 @@
     return matched;
   }
 
-  function hideDeclutterMobileInlineVisitButtons(root = document) {
-    if (!get('declutter')) return false;
-    const scope = root?.nodeType === 1 ? root : document;
-    const nodes = new Set();
-    if (scope.matches?.('[data-test-id="visit-button-mobile-inline"], [data-test-id="main-pin-section-visit-button"]')) {
-      nodes.add(scope);
-    }
-    scope.querySelectorAll?.('[data-test-id="visit-button-mobile-inline"], [data-test-id="main-pin-section-visit-button"]').forEach(el => nodes.add(el));
-
-    let matched = false;
-    nodes.forEach(el => {
-      const actionContainer = el.closest('[data-test-id="pin-action-bar-container"]');
-      const wrapper = actionContainer?.parentElement && actionContainer.parentElement.children.length === 1
-        ? actionContainer.parentElement
-        : actionContainer;
-      collapseEl(wrapper || el);
-      matched = true;
-    });
-    return matched;
-  }
-
   // True only for genuine ads (Sponsored / Partner / Promoted), used by the
   // "Ads blocked" stat — a stricter subset of isDeclutterPin.
   function isSponsoredPin(pin) {
@@ -1547,7 +1798,6 @@
   function scanDeclutterNode(node) {
     if (!node || node.nodeType !== 1) return false;
     let matched = false;
-    matched = hideDeclutterMobileInlineVisitButtons(node) || matched;
     matched = hideShopTheLookModules(node) || matched;
     const closestPin = node.closest?.('div[role="listitem"]');
     if (closestPin) matched = collapseDeclutterPin(closestPin) || matched;
@@ -1562,7 +1812,6 @@
     let matched = false;
     records.forEach(record => {
       if (record.type === 'attributes') {
-        matched = hideDeclutterMobileInlineVisitButtons(record.target) || matched;
         matched = hideShopTheLookModules(record.target) || matched;
         matched = collapseDeclutterPin(record.target.closest?.('div[role="listitem"]')) || matched;
         return;
@@ -1576,7 +1825,6 @@
 
   function filterPins(container) {
     if (!get('declutter')) return;
-    hideDeclutterMobileInlineVisitButtons(container);
     hideShopTheLookModules(container);
     container.querySelectorAll('div[role="listitem"]').forEach(pin => {
       collapseDeclutterPin(pin);
@@ -1592,7 +1840,6 @@
   function removeDeclutterOneoffs() {
     if (!get('declutter')) return;
     hideShopTheLookModules(document);
-    hideDeclutterMobileInlineVisitButtons(document);
     if (isMobilePinCloseupPage()) return;
     // Shop tab on board tools bar
     document.querySelectorAll('[data-test-id="board-tools"] [data-test-id="Shop"]')
@@ -1666,6 +1913,7 @@
   }
 
   let _declutterListObs = null;
+  let _declutterListCounter = 0;
 
   function initDeclutter() {
     if (!get('declutter')) return;
@@ -1675,19 +1923,22 @@
       if (listEl.__peDeclutterObs) return;
       listEl.__peDeclutterObs = true;
       filterPins(listEl);
-      const onMutate = IS_MOBILE ? debounce(() => filterPins(listEl), 200) : () => filterPins(listEl);
-      new MutationObserver(records => {
+      const onMutate = IS_MOBILE ? debounce(() => filterPins(listEl), 350) : () => filterPins(listEl);
+      const listObs = new MutationObserver(records => {
         if (hasOnlyPowerMenuMutations(records)) return;
         const matched = scanDeclutterMutationRecords(records);
         if (matched) return;
         onMutate();
-      })
-        .observe(listEl, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ['title', 'aria-label', 'data-test-id'],
-        });
+      });
+      listObs.observe(listEl, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['title', 'aria-label', 'data-test-id'],
+      });
+      const listName = 'declutter-list-' + (++_declutterListCounter);
+      listEl.__peDeclutterObserverName = listName;
+      registerObserver(listName, listObs, { target: listEl });
     }
 
     // Attach to any already-present lists
@@ -1695,13 +1946,14 @@
     removeDeclutterOneoffs();
 
     // Watch for new lists added by SPA navigation or lazy load
-    if (_declutterListObs) return;
+    if (hasObserver('declutter')) return;
     _declutterListObs = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
       document.querySelectorAll('div[role="list"]').forEach(attachListObserver);
       removeDeclutterOneoffs();
     });
     _declutterListObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('declutter', _declutterListObs, { target: document.documentElement });
   }
 
 
@@ -1749,13 +2001,13 @@
   let _removeVideosObs = null;
 
   function initRemoveVideos() {
-    if (!get('removeVideos') || _removeVideosObs) return;
+    if (!get('removeVideos') || hasObserver('removeVideos')) return;
 
     function attachListObserver(listEl) {
       if (listEl.__peVideoObs) return;
       listEl.__peVideoObs = true;
       filterVideoPins(listEl);
-      const onMutate = IS_MOBILE ? debounce(() => filterVideoPins(listEl), 200) : () => filterVideoPins(listEl);
+      const onMutate = IS_MOBILE ? debounce(() => filterVideoPins(listEl), 350) : () => filterVideoPins(listEl);
       new MutationObserver(records => {
         if (hasOnlyPowerMenuMutations(records)) return;
         onMutate();
@@ -1770,6 +2022,7 @@
       document.querySelectorAll('div[role="list"]').forEach(attachListObserver);
     });
     _removeVideosObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('removeVideos', _removeVideosObs, { target: document.documentElement });
   }
 
 
@@ -1797,6 +2050,7 @@
   const _hiddenShopPosts = new Map();
   const _hideShopPostListObservers = new Map();
   let _hideShopPostsObs = null;
+  let _hideShopPostsListCounter = 0;
 
   function hideShopPin(pin) {
     if (pin.__peShopHidden) return;
@@ -1840,14 +2094,21 @@
       onMutate();
     });
     obs.observe(listEl, { childList: true, subtree: true });
+    const listName = 'hideshopposts-list-' + (++_hideShopPostsListCounter);
+    listEl.__peShopObserverName = listName;
+    registerObserver(listName, obs, { target: listEl });
     _hideShopPostListObservers.set(listEl, obs);
   }
 
   function stopHideShopPosts({ restore = true } = {}) {
-    if (_hideShopPostsObs) { _hideShopPostsObs.disconnect(); _hideShopPostsObs = null; }
+    if (_hideShopPostsObs) { _hideShopPostsObs.disconnect(); _hideShopPostsObs = null; unregisterObserver('hideShopPosts'); }
     _hideShopPostListObservers.forEach((obs, listEl) => {
       obs.disconnect();
-      if (listEl) delete listEl.__peShopObs;
+      if (listEl) {
+        if (listEl.__peShopObserverName) unregisterObserver(listEl.__peShopObserverName);
+        delete listEl.__peShopObs;
+        delete listEl.__peShopObserverName;
+      }
     });
     _hideShopPostListObservers.clear();
     if (restore) restoreShopPosts();
@@ -1858,12 +2119,13 @@
 
     document.querySelectorAll('div[role="list"]').forEach(attachShopPostListObserver);
 
-    if (_hideShopPostsObs) return;
+    if (hasObserver('hideShopPosts')) return;
     _hideShopPostsObs = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
       document.querySelectorAll('div[role="list"]').forEach(attachShopPostListObserver);
     });
     _hideShopPostsObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('hideShopPosts', _hideShopPostsObs, { target: document.documentElement });
   }
 
 
@@ -1940,7 +2202,13 @@
     pin.querySelectorAll('a[href*="/pin/"][aria-label]').forEach(a => {
       parts.push((a.getAttribute('aria-label') || '').replace(/\s*pin page\s*$/i, ''));
     });
-    pin.querySelectorAll('img[alt]').forEach(img => parts.push(img.getAttribute('alt') || ''));
+    pin.querySelectorAll('img[alt]').forEach(img => {
+      // Comment avatars / user images inside comment sections can have alt text
+      // that matches AI keywords or the title blocklist, which would collapse the
+      // whole closeup post when comments open.
+      if (img.closest('[data-test-id*="comment"], [data-test-id="closeup-comments"], [data-test-id="comment-list"], [data-test-id="comment-feed"], #canonical-card, [data-test-id="comment-editor-container"]')) return;
+      parts.push(img.getAttribute('alt') || '');
+    });
     return parts.join(' \n ').toLowerCase();
   }
 
@@ -1978,7 +2246,10 @@
   }
 
   function isContentFilterActive() {
-    return !!get('hideAiContent') || getTitleBlockWords().length > 0;
+    return !!get('hideAiContent') ||
+      getTitleBlockWords().length > 0 ||
+      !!get('hideByPinIdEnabled') ||
+      !!get('hideSeenPins');
   }
 
   // Persist opened pin IDs across React re-renders. React replaces feed card
@@ -1987,6 +2258,26 @@
   // freshly-rendered card for the same pin is still protected.
   const _openedPinIds = new Set();
   let _pinClickTrackerAdded = false;
+
+  const CLOSEUP_ROOT_SELECTORS = [
+    '[data-test-id="pin-closeup-image"]',
+    '[data-test-id="closeup-body-image-container"]',
+    '[data-test-id="visual-content-container"]',
+    '[data-test-id="story-pin-closeup"]',
+    '[data-test-id="closeup-image"]',
+    '[data-test-id="pin-closeup"]',
+    '#canonical-card',
+  ].join(', ');
+
+  function isInsideCloseupRoot(el) {
+    if (!el || !el.closest) return false;
+    return !!el.closest(CLOSEUP_ROOT_SELECTORS);
+  }
+
+  function protectCurrentCloseupPinId() {
+    const m = location.pathname.match(/\/pin\/(\d+)/);
+    if (m) _openedPinIds.add(m[1]);
+  }
 
   function ensurePinClickTracker() {
     if (_pinClickTrackerAdded) return;
@@ -1999,6 +2290,9 @@
       const listitem = link.closest('div[role="listitem"]');
       if (listitem) listitem.__peUserOpened = true;
     }, true);
+    // Direct navigation to a pin URL should also protect that pin.
+    protectCurrentCloseupPinId();
+    window.addEventListener('popstate', protectCurrentCloseupPinId);
   }
 
   function getPinIdFromCard(pin) {
@@ -2012,6 +2306,19 @@
     if (pin.__peUserOpened) return false;
     const id = getPinIdFromCard(pin);
     if (id && _openedPinIds.has(id)) return false;
+    // Never hide the main closeup pin on a /pin/ page. Comments and related
+    // content rendered inside/near that container should not collapse the post
+    // the user explicitly opened.
+    if (/\/pin\/\d+/.test(location.pathname) && isInsideCloseupRoot(pin)) return false;
+
+    if (get('hideByPinIdEnabled') && id && isPinIdHidden(id)) {
+      return true;
+    }
+
+    if (get('hideSeenPins') && id && _openedPinIds.has(id)) {
+      return true;
+    }
+
     if (get('hideAiContent') && isAiPin(pin)) {
       bumpStat('statShowAiBlocked', 'statCountAiBlocked');
       return true;
@@ -2023,6 +2330,7 @@
   const _hiddenFilterPosts = new Map();
   const _contentFilterListObservers = new Map();
   let _contentFilterObs = null;
+  let _contentFilterListCounter = 0;
 
   function hideFilteredPin(pin) {
     if (pin.__peFilterHidden) return;
@@ -2050,12 +2358,38 @@
     _hiddenFilterPosts.clear();
   }
 
-  function filterContentPosts(container) {
+  async function filterContentPosts(container) {
     if (!isContentFilterActive()) return;
-    container.querySelectorAll('div[role="listitem"]').forEach(pin => {
-      if (pin.__peFilterHidden) return;
+
+    // Safety restore: anything that was already hidden inside the closeup root
+    // should never stay hidden once the user is viewing the pin.
+    if (/\/pin\/\d+/.test(location.pathname)) {
+      _hiddenFilterPosts.forEach((style, pin) => {
+        if (pin && pin.isConnected && isInsideCloseupRoot(pin)) {
+          pin.style.display = style.display;
+          pin.style.visibility = style.visibility;
+          pin.style.height = style.height;
+          pin.style.minHeight = style.minHeight;
+          pin.style.overflow = style.overflow;
+          delete pin.__peFilterHidden;
+          _hiddenFilterPosts.delete(pin);
+        }
+      });
+    }
+
+    const pins = container.querySelectorAll('div[role="listitem"]');
+    for (let i = 0; i < pins.length; i++) {
+      const pin = pins[i];
+      if (pin.__peFilterHidden) continue;
+      // Skip list items that are actually comments or comment threads, and skip
+      // any list item that doesn't link to a pin (so comments aren't treated as pins).
+      if (pin.closest('[data-test-id*="comment"], [data-test-id="closeup-comments"], [data-test-id="comment-list"], [data-test-id="comment-feed"], #canonical-card, [data-test-id="comment-editor-container"]')) continue;
+      // Skip anything rendered inside the main closeup container on a pin page.
+      if (/\/pin\/\d+/.test(location.pathname) && isInsideCloseupRoot(pin)) continue;
+      if (!pin.querySelector('a[href*="/pin/"]')) continue;
       if (shouldHideForFilter(pin)) hideFilteredPin(pin);
-    });
+      if (IS_MOBILE && i % 8 === 7) await schedulerYield();
+    }
   }
 
   function attachContentFilterListObserver(listEl) {
@@ -2067,7 +2401,10 @@
       '[data-test-id="comment-list"],[data-test-id="comment-feed"]'
     )) return;
     filterContentPosts(listEl);
-    const onMutate = IS_MOBILE ? debounce(() => filterContentPosts(listEl), 200) : () => filterContentPosts(listEl);
+    // On mobile, throttle more aggressively and let the filter work yield;
+    // attribute changes are still observed so lazy-filled titles are caught,
+    // but the debounce keeps the cost off the critical scroll path.
+    const onMutate = IS_MOBILE ? debounce(() => filterContentPosts(listEl), 350) : () => filterContentPosts(listEl);
     const obs = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
       onMutate();
@@ -2081,12 +2418,19 @@
       attributes: true,
       attributeFilter: ['alt', 'aria-label', 'title', 'data-test-id'],
     });
+    const listName = 'contentfilter-list-' + (++_contentFilterListCounter);
+    listEl.__peFilterObserverName = listName;
+    registerObserver(listName, obs, { target: listEl });
     _contentFilterListObservers.set(listEl, obs);
   }
 
   function stopContentFilter({ restore = true } = {}) {
-    if (_contentFilterObs) { _contentFilterObs.disconnect(); _contentFilterObs = null; }
-    _contentFilterListObservers.forEach(obs => obs.disconnect());
+    if (_contentFilterObs) { _contentFilterObs.disconnect(); _contentFilterObs = null; unregisterObserver('contentFilter'); }
+    _contentFilterListObservers.forEach((obs, listEl) => {
+      obs.disconnect();
+      if (listEl && listEl.__peFilterObserverName) unregisterObserver(listEl.__peFilterObserverName);
+      if (listEl) delete listEl.__peFilterObserverName;
+    });
     _contentFilterListObservers.clear();
     if (restore) restoreFilteredPosts();
   }
@@ -2097,12 +2441,13 @@
 
     document.querySelectorAll('div[role="list"]').forEach(attachContentFilterListObserver);
 
-    if (_contentFilterObs) return;
+    if (hasObserver('contentFilter')) return;
     _contentFilterObs = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
       document.querySelectorAll('div[role="list"]').forEach(attachContentFilterListObserver);
     });
     _contentFilterObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('contentFilter', _contentFilterObs, { target: document.documentElement });
   }
 
   // Re-evaluate every pin after a toggle / aggressiveness / keyword change.
@@ -2152,12 +2497,138 @@
   function initHideComments() {
     if (!get('hideComments')) return;
     hideCommentEditorWrapper();
-    if (_hideCommentsObs) return;
+    if (hasObserver('hideComments')) return;
     _hideCommentsObs = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
       scheduleHideComments();
     });
     _hideCommentsObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('hideComments', _hideCommentsObs, { target: document.documentElement });
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  MODULE: COMMENT KEYWORD BLOCKER
+  // ═══════════════════════════════════════════════════════════════════
+  // Hides individual comments that contain user-defined words/phrases.
+  // Checks both the original text (if auto-translate stored it) and the
+  // currently displayed text so it works before or after translation.
+
+  const COMMENT_BLOCK_SELECTOR = '[data-test-id="commentThread-comment"]';
+  const _blockedComments = new Map();
+  let _commentBlockerObs = null;
+  let _commentBlockerTextObs = null;
+
+  function getCommentBlockPhrases() {
+    if (!get('commentBlockEnabled')) return [];
+    return String(get('commentBlockKeywords') || '')
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  function isCommentBlocked(comment, phrases) {
+    if (!phrases.length) return false;
+    // The auto-translate module stores the original on the text container child;
+    // look there, then fall back to the comment itself.
+    const translatedEl = comment.querySelector('[data-pe-auto-translate-original]');
+    const original = (
+      (comment.getAttribute('data-pe-auto-translate-original') || '') +
+      ' ' + (translatedEl?.getAttribute('data-pe-auto-translate-original') || '')
+    ).toLowerCase();
+    const current = (comment.textContent || '').toLowerCase();
+    return phrases.some(p => original.includes(p) || current.includes(p));
+  }
+
+  function applyCommentBlock(comment) {
+    if (comment.__peCommentBlocked) return;
+    comment.__peCommentBlocked = true;
+    _blockedComments.set(comment, {
+      display: comment.style.display,
+    });
+    comment.style.setProperty('display', 'none', 'important');
+  }
+
+  function restoreBlockedComments() {
+    _blockedComments.forEach((style, comment) => {
+      if (!comment || !comment.style) return;
+      comment.style.display = style.display;
+      delete comment.__peCommentBlocked;
+    });
+    _blockedComments.clear();
+  }
+
+  function restoreComment(comment) {
+    const style = _blockedComments.get(comment);
+    if (!style) return;
+    comment.style.display = style.display;
+    delete comment.__peCommentBlocked;
+    _blockedComments.delete(comment);
+  }
+
+  function evaluateComment(comment, phrases) {
+    if (!phrases) phrases = getCommentBlockPhrases();
+    if (!phrases.length) {
+      if (comment.__peCommentBlocked) restoreComment(comment);
+      return;
+    }
+    if (isCommentBlocked(comment, phrases)) {
+      applyCommentBlock(comment);
+    } else if (comment.__peCommentBlocked) {
+      restoreComment(comment);
+    }
+  }
+
+  function scanCommentBlocker(root = document) {
+    const phrases = getCommentBlockPhrases();
+    if (!phrases.length) {
+      restoreBlockedComments();
+      return;
+    }
+    root.querySelectorAll(COMMENT_BLOCK_SELECTOR).forEach(comment => evaluateComment(comment, phrases));
+  }
+
+  function stopCommentBlocker() {
+    if (_commentBlockerObs) { _commentBlockerObs.disconnect(); _commentBlockerObs = null; unregisterObserver('commentBlocker'); }
+    if (_commentBlockerTextObs) { _commentBlockerTextObs.disconnect(); _commentBlockerTextObs = null; unregisterObserver('commentBlockerText'); }
+    restoreBlockedComments();
+  }
+
+  function refreshCommentBlocker() {
+    if (!get('commentBlockEnabled')) {
+      stopCommentBlocker();
+      return;
+    }
+    scanCommentBlocker(document);
+    if (hasObserver('commentBlocker')) return;
+    _commentBlockerObs = new MutationObserver(records => {
+      if (hasOnlyPowerMenuMutations(records)) return;
+      const phrases = getCommentBlockPhrases();
+      if (!phrases.length) { restoreBlockedComments(); return; }
+      records.forEach(r => r.addedNodes.forEach(n => {
+        if (n.nodeType !== 1) return;
+        if (n.matches && n.matches(COMMENT_BLOCK_SELECTOR)) evaluateComment(n, phrases);
+        if (n.querySelectorAll) n.querySelectorAll(COMMENT_BLOCK_SELECTOR).forEach(c => evaluateComment(c, phrases));
+      }));
+    });
+    _commentBlockerObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('commentBlocker', _commentBlockerObs, { target: document.documentElement });
+
+    // Re-check when comment text changes (including after auto-translation).
+    if (hasObserver('commentBlockerText')) return;
+    _commentBlockerTextObs = new MutationObserver(records => {
+      if (hasOnlyPowerMenuMutations(records)) return;
+      const phrases = getCommentBlockPhrases();
+      const comments = new Set();
+      records.forEach(r => {
+        const target = r.target.nodeType === 1 ? r.target : r.target.parentElement;
+        const comment = target?.closest?.(COMMENT_BLOCK_SELECTOR);
+        if (comment) comments.add(comment);
+      });
+      comments.forEach(c => evaluateComment(c, phrases));
+    });
+    _commentBlockerTextObs.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    registerObserver('commentBlockerText', _commentBlockerTextObs, { target: document.documentElement });
   }
 
 
@@ -2236,6 +2707,10 @@
   let _autoTranslateRescan = null;
   let _manualTranslateMO = null;
   let _manualTranslateRescan = null;
+  // Exponential backoff for translation rate limits (429) and network errors.
+  let _translateBackoffUntil = 0;
+  let _translateBackoffMs = 2000;
+  const TRANSLATE_MAX_BACKOFF_MS = 60000;
 
   function getAutoTranslateTargetLang() {
     const raw = String(get('autoTranslateTarget') || 'browser').toLowerCase();
@@ -2373,6 +2848,20 @@
     const key = `${target}\n${text}`;
     if (_translateCache.has(key)) return Promise.resolve(_translateCache.get(key));
 
+    // Respect rate-limit / error backoff so we don't hammer Google.
+    if (Date.now() < _translateBackoffUntil) {
+      return Promise.resolve({ translatedText: text, detectedLanguage: '', targetLanguage: target, status: 'error' });
+    }
+
+    function onTranslationError() {
+      _translateBackoffUntil = Date.now() + _translateBackoffMs;
+      _translateBackoffMs = Math.min(_translateBackoffMs * 2, TRANSLATE_MAX_BACKOFF_MS);
+    }
+
+    function onTranslationSuccess() {
+      _translateBackoffMs = 2000;
+    }
+
     return new Promise(resolve => {
       const url = 'https://translate.googleapis.com/translate_a/single' +
         '?client=gtx&sl=auto&tl=' + encodeURIComponent(target) +
@@ -2382,14 +2871,23 @@
         url,
         timeout: 10000,
         onload: r => {
+          // 429 / 5xx from Google should back off just like network errors.
+          if (r.status >= 429 && r.status < 600) {
+            onTranslationError();
+            resolve({ translatedText: text, detectedLanguage: '', targetLanguage: target, status: 'error' });
+            return;
+          }
+          onTranslationSuccess();
           const result = normalizeTranslationResponse(text, target, r.responseText);
           rememberTranslation(key, result);
           resolve(result);
         },
         onerror: () => {
+          onTranslationError();
           resolve({ translatedText: text, detectedLanguage: '', targetLanguage: target, status: 'error' });
         },
         ontimeout: () => {
+          onTranslationError();
           resolve({ translatedText: text, detectedLanguage: '', targetLanguage: target, status: 'error' });
         },
       });
@@ -2587,8 +3085,8 @@
   }
 
   function stopAutoTranslate() {
-    if (_autoTranslateIO) { _autoTranslateIO.disconnect(); _autoTranslateIO = null; }
-    if (_autoTranslateMO) { _autoTranslateMO.disconnect(); _autoTranslateMO = null; }
+    if (_autoTranslateIO) { _autoTranslateIO.disconnect(); _autoTranslateIO = null; unregisterObserver('autoTranslateIO'); }
+    if (_autoTranslateMO) { _autoTranslateMO.disconnect(); _autoTranslateMO = null; unregisterObserver('autoTranslateMO'); }
     _translateQueue.length = 0;
     clearTranslateCandidateState();
     restoreAutoTranslations();
@@ -2602,9 +3100,10 @@
           if (entry.isIntersecting) queueTranslateElement(entry.target);
         });
       }, { rootMargin: '220px 0px', threshold: 0.01 });
+      registerObserver('autoTranslateIO', _autoTranslateIO, {});
     }
     scanAutoTranslateCandidates(document);
-    if (_autoTranslateMO) return;
+    if (hasObserver('autoTranslateMO')) return;
     _autoTranslateRescan = debounce(() => scanAutoTranslateCandidates(document), IS_MOBILE ? 700 : 300);
     _autoTranslateMO = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
@@ -2616,6 +3115,7 @@
       attributes: true,
       attributeFilter: ['aria-expanded'],
     });
+    registerObserver('autoTranslateMO', _autoTranslateMO, { target: document.documentElement });
   }
 
   function removeManualTranslateButtonFor(el) {
@@ -2695,7 +3195,7 @@
   }
 
   function stopManualTranslateButtons() {
-    if (_manualTranslateMO) { _manualTranslateMO.disconnect(); _manualTranslateMO = null; }
+    if (_manualTranslateMO) { _manualTranslateMO.disconnect(); _manualTranslateMO = null; unregisterObserver('manualTranslateMO'); }
     document.querySelectorAll('.pe-manual-translate-mount').forEach(mount => mount.remove());
     document.querySelectorAll('.pe-manual-translate-btn').forEach(btn => btn.remove());
     document.querySelectorAll(AUTO_TRANSLATE_SELECTORS).forEach(el => { el.__peManualTranslateButton = null; });
@@ -2707,7 +3207,7 @@
       return;
     }
     scanManualTranslateCandidates(document);
-    if (_manualTranslateMO) return;
+    if (hasObserver('manualTranslateMO')) return;
     _manualTranslateRescan = debounce(() => scanManualTranslateCandidates(document), IS_MOBILE ? 700 : 300);
     _manualTranslateMO = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
@@ -2719,6 +3219,7 @@
       attributes: true,
       attributeFilter: ['aria-expanded'],
     });
+    registerObserver('manualTranslateMO', _manualTranslateMO, { target: document.documentElement });
   }
 
   function refreshTranslationFeatures() {
@@ -2783,10 +3284,49 @@
     return '.jpg';
   }
 
+  // Convert an image ArrayBuffer from one raster format to another using a canvas.
+  // Falls back to the original buffer on any error (CORS taint, canvas size limits,
+  // unsupported source, etc.) so downloads never fail because of conversion.
+  async function convertImageBuffer(buf, sourceExt, targetExt) {
+    if (!buf || sourceExt === targetExt) return buf;
+    if (sourceExt !== '.webp' || targetExt !== '.png') return buf;
+    let url = null;
+    try {
+      const blob = new Blob([buf], { type: 'image/webp' });
+      url = URL.createObjectURL(blob);
+      const img = new Image();
+      // Blob URLs are same-origin; adding crossOrigin can taint the canvas in some
+      // browsers, so leave it off for the object-URL path.
+      await new Promise((res, rej) => {
+        img.onload = res;
+        img.onerror = rej;
+        img.src = url;
+      });
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const outBlob = await new Promise((res, rej) => {
+        canvas.toBlob(b => b ? res(b) : rej(new Error('toBlob returned null')), 'image/png');
+      });
+      return await outBlob.arrayBuffer();
+    } catch (_) {
+      return buf;
+    } finally {
+      if (url) URL.revokeObjectURL(url);
+    }
+  }
+
   function sanitizeFilename(n) {
     if (!n) return null;
-    let s = String(n).replace(/[<>:"/\\|?*\x00-\x1f\x80-\x9f]/g, '').trim();
-    if (s.length > 200) s = s.slice(0, 200);
+    let s = String(n).replace(/[<>:"/\|?*\x00-\x1f\x80-\x9f]/g, '').trim();
+    // Windows reserves these base names regardless of extension.
+    const reserved = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i;
+    if (reserved.test(s)) s = '_' + s;
+    // Trailing dots or spaces confuse Windows Explorer / FAT/NTFS.
+    s = s.replace(/[\.\s]+$/, '');
+    if (s.length > 200) s = s.slice(0, 200).replace(/[\.\s]+$/, '');
     return s.length ? s : null;
   }
 
@@ -2808,7 +3348,27 @@
   }
 
   function makeFallbackPinName() {
-    return `Pin - ${randDigits(8)}`;
+    return `Pin-${randDigits(12)}`;
+  }
+
+  const FILENAME_STRATEGY_OPTIONS = [
+    { value: 'title',   label: 'Pin name' },
+    { value: 'pinCode', label: 'Pin code' },
+    { value: 'random',  label: 'Random number' },
+  ];
+
+  // Build a download filename per the chosen strategy, with auto-fallback.
+  // title: sanitized pin title or '' ; id: pin id string or '' ; strategy: chosen value.
+  // When the chosen source is missing it falls through to the other real
+  // identifier before finally using a random number.
+  function buildPinFilename(title, id, strategy) {
+    const code = id ? `Pin-${id}` : '';
+    switch (strategy) {
+      case 'random':  return makeFallbackPinName();
+      case 'pinCode': return code || title || makeFallbackPinName();
+      case 'title':
+      default:        return title || code || makeFallbackPinName();
+    }
   }
 
   const CLOSEUP_PIN_TITLE_SELECTORS = [
@@ -2855,7 +3415,7 @@
   function upgradeToOriginal(url) {
     if (!url) return url;
     const m = url.match(OQ_RE);
-    return m ? m[1] + '/originals' + m[2] : url;
+    return m ? pinimgOriginalCandidates(m[1], m[2])[0] : url;
   }
 
   function getBestCloseupImageUrl(img) {
@@ -3008,12 +3568,10 @@
 
   function extractFocusedPinTitle(anchor) {
     const focusedRoot = getFocusedCloseupRoot(anchor);
-    const focusedTitle = extractPinTitleFromScope(focusedRoot);
-    if (focusedTitle) return focusedTitle;
-    const documentTitle = extractPinTitleFromScope(document, CLOSEUP_PIN_TITLE_SELECTORS);
-    if (documentTitle) return documentTitle;
-    const pinId = location.pathname.match(/\/pin\/(\d+)/i)?.[1];
-    return pinId ? `Pin - ${pinId}` : makeFallbackPinName();
+    const title = extractPinTitleFromScope(focusedRoot) ||
+      extractPinTitleFromScope(document, CLOSEUP_PIN_TITLE_SELECTORS) || '';
+    const pinId = location.pathname.match(/\/pin\/(\d+)/i)?.[1] || '';
+    return buildPinFilename(title, pinId, get('filenameStrategy'));
   }
 
   function getCloseupScopePart(root, selector) {
@@ -3216,6 +3774,20 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  // Trigger an <a download> click. On iOS Safari / many WebViews the download
+  // attribute is ignored for blob URLs, so we also open the URL in a new tab
+  // so the user can Share → Save to Files. `revokeMs` controls how long the
+  // blob URL is kept alive for that fallback.
+  function triggerAnchorDownload(a, url, revokeMs = 10000) {
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    try { a.click(); } catch (_) {}
+    if (IS_MOBILE && /iphone|ipad|ipod/i.test(navigator.userAgent)) {
+      try { window.open(url, '_blank', 'noopener'); } catch (_) {}
+    }
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, revokeMs);
+  }
+
   // Build a descending-quality URL queue for a pinimg.com image.
   // Tries originals first, then 736x, then 564x so we always get *something*
   // even when the /originals/ path is access-restricted for a given pin.
@@ -3237,12 +3809,8 @@
     );
     if (!m) return [url];
     const [, base, path] = m;
-    // Deduplicate while preserving order
-    return [
-      base + '/originals' + path,
-      base + '/736x'      + path,
-      base + '/564x'      + path,
-    ].filter((u, i, a) => a.indexOf(u) === i);
+    // Try alternate original extensions before falling back to sized versions.
+    return [...new Set([...pinimgOriginalCandidates(base, path), base + '/564x' + path])];
   }
 
   async function fetchBestImageBuffer(imageUrl) {
@@ -3252,24 +3820,29 @@
     return null;
   }
 
-  function buildImageDownloadName(buf, filename) {
-    const ext = detectFileType(new Uint8Array(buf));
+  function buildImageDownloadName(buf, filename, finalExt) {
+    const ext = finalExt || detectFileType(new Uint8Array(buf));
     const explicitTitle = stripKnownExt(sanitizeFilename(filename || ''));
     const pageTitle = stripKnownExt(extractPinTitle() || '');
     const basePart = explicitTitle || pageTitle || makeFallbackPinName();
     return basePart + ext;
   }
 
-  function saveImageBuffer(buf, filename) {
+  async function saveImageBuffer(buf, filename) {
     if (!buf) return false;
+    const rawExt = detectFileType(new Uint8Array(buf));
+    let finalBuf = buf;
+    let finalExt = rawExt;
+    if (get('convertWebpToPng') && rawExt === '.webp') {
+      finalBuf = await convertImageBuffer(buf, '.webp', '.png');
+      if (finalBuf !== buf) finalExt = '.png';
+    }
     try {
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([buf]));
-      a.download = buildImageDownloadName(buf, filename);
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
+      const url = URL.createObjectURL(new Blob([finalBuf]));
+      a.href = url;
+      a.download = buildImageDownloadName(finalBuf, filename, finalExt);
+      triggerAnchorDownload(a, url, 10000);
       bumpStat('statShowImagesDownloaded', 'statCountImagesDownloaded');
       return true;
     } catch (_) {
@@ -3366,6 +3939,44 @@
     return /\/pin\/\d/i.test(location.pathname);
   }
 
+  // Pinterest's obfuscated action-bar class names change every deploy. Learn the
+  // current slot wrapper class from a known native button instead of hard-coding
+  // .oRZ5_s. Falls back to .oRZ5_s and then to [role="listitem"] if learning fails.
+  let _learnedActionSlotClass = '';
+  const NATIVE_ACTION_BUTTON_SELECTORS = [
+    '[data-test-id="react-button"]',
+    '[data-test-id="comment-button"]',
+    'button[aria-label="Comments"]',
+    '[data-test-id="closeup-share-button"]',
+    '[data-test-id="closeup-more-options"]',
+    '[data-test-id="context-menu-button"]',
+    '[data-test-id="ellipsis-button"]',
+    '[data-test-id="more-actions-button"]',
+    'button[aria-label="More actions"]',
+  ];
+
+  function learnActionBarClasses() {
+    if (_learnedActionSlotClass) return;
+    const row = getCloseupActionIconRow();
+    if (!row) return;
+    for (const child of row.children) {
+      if (!child.querySelector) continue;
+      if (NATIVE_ACTION_BUTTON_SELECTORS.some(sel => child.querySelector(sel))) {
+        const firstClass = (child.className || '').split(/\s+/).filter(Boolean)[0];
+        if (firstClass) {
+          _learnedActionSlotClass = firstClass;
+          debugLog('log', 'Learned action-bar slot class:', _learnedActionSlotClass);
+        }
+        break;
+      }
+    }
+  }
+
+  function getActionSlotSelector() {
+    if (_learnedActionSlotClass) return '.' + _learnedActionSlotClass;
+    return '.oRZ5_s';
+  }
+
   function getCloseupActionIconRow() {
     const actionItems = getCloseupActionItems();
     if (!actionItems) return null;
@@ -3379,10 +3990,12 @@
 
   function findCloseupActionSlot(row, selector) {
     if (!row?.querySelectorAll) return null;
-    for (const slot of row.querySelectorAll(':scope > .oRZ5_s')) {
+    learnActionBarClasses();
+    const slotSelector = getActionSlotSelector();
+    for (const slot of row.querySelectorAll(`:scope > ${slotSelector}`)) {
       if (slot.querySelector(selector)) return slot;
     }
-    const found = row.querySelector(selector)?.closest('.oRZ5_s, [role="listitem"]') || null;
+    const found = row.querySelector(selector)?.closest(`${slotSelector}, [role="listitem"]`) || null;
     if (!found) return null;
     let direct = found;
     while (direct && direct.parentElement !== row) direct = direct.parentElement;
@@ -4115,7 +4728,8 @@
   async function downloadCurrentPinCardMedia(btn) {
     const card = getPinCardFromDownloadButton(btn);
     if (!card) return false;
-    const title = extractPinTitleFromScope(card) || makeFallbackPinName();
+    const title = buildPinFilename(
+      extractPinTitleFromScope(card) || '', getPinIdFromCard(card) || '', get('filenameStrategy'));
     const videoDownload = findCurrentPinCardVideoDownload(btn);
     if (videoDownload) {
       await downloadVideoFile(videoDownload.urls, title, (loaded, total) => {
@@ -4204,7 +4818,7 @@
   function initDesktopPinCardQuickDownloadButton() {
     if (IS_MOBILE) return;
     refreshDesktopPinCardQuickDownloadButtons();
-    if (_pinCardQuickDownloadObs) return;
+    if (hasObserver('pinCardQuickDownload')) return;
     _pinCardQuickDownloadRescan = debounce(() => {
       const roots = [..._pinCardQuickDownloadPendingRoots];
       _pinCardQuickDownloadPendingRoots.clear();
@@ -4221,6 +4835,7 @@
       _pinCardQuickDownloadRescan();
     });
     _pinCardQuickDownloadObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('pinCardQuickDownload', _pinCardQuickDownloadObs, { target: document.documentElement });
   }
 
   function createCloseupImageDownloadButton() {
@@ -4238,18 +4853,17 @@
 
     const slot = document.createElement('div');
     slot.id = 'pe-closeup-image-dl-slot';
-    slot.className = 'oRZ5_s';
-    slot.classList.add('pe-closeup-action-slot');
+    slot.className = 'pe-closeup-action-slot';
     if (IS_MOBILE) slot.classList.add('pe-mobile-closeup-action-slot');
     slot.dataset.peCloseupAction = 'download';
     slot.setAttribute('data-pe-ui', 'true');
     absorbCloseupActionEvents(slot);
 
     const item = document.createElement('div');
-    item.className = 'ADXRXN';
+    item.className = 'pe-closeup-action-item';
     item.setAttribute('role', 'listitem');
     item.innerHTML = `
-      <button id="pe-closeup-image-dl-btn" class="euRXRl" type="button" aria-label="Download" title="Download">
+      <button id="pe-closeup-image-dl-btn" class="pe-closeup-action-button" type="button" aria-label="Download" title="Download">
         <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true">
           <path d="M11 4h2v8.59l2.3-2.3L16.7 11.7 12 16.4l-4.7-4.7 1.4-1.41 2.3 2.3V4zM5 19h14v2H5z"/>
         </svg>
@@ -4321,6 +4935,7 @@
     _mobileCloseupActionObs = null;
     _mobileCloseupActionObservedRoot = null;
     _mobileCloseupActionSignature = '';
+    unregisterObserver('mobileCloseupAction');
   }
 
   function observeMobileCloseupActionBar() {
@@ -4328,7 +4943,7 @@
     const row = getMobileCloseupActionItems();
     const root = row?.closest?.('[data-test-id="closeup-pin-action-bar-container"]') || row;
     if (!root) return false;
-    if (_mobileCloseupActionObs && _mobileCloseupActionObservedRoot === root) return true;
+    if (hasObserver('mobileCloseupAction') && _mobileCloseupActionObservedRoot === root) return true;
     disconnectMobileCloseupActionObserver();
     _mobileCloseupActionObservedRoot = root;
     _mobileCloseupActionObs = new MutationObserver(records => {
@@ -4341,6 +4956,7 @@
       attributes: true,
       attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'],
     });
+    registerObserver('mobileCloseupAction', _mobileCloseupActionObs, { target: root });
     return true;
   }
 
@@ -4359,13 +4975,14 @@
       return;
     }
     createCloseupImageDownloadButton();
-    if (_closeupImageDlObs) return;
+    if (hasObserver('closeupImageDl')) return;
     const retry = debounce(createCloseupImageDownloadButton, 150);
     _closeupImageDlObs = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
       retry();
     });
     _closeupImageDlObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('closeupImageDl', _closeupImageDlObs, { target: document.documentElement });
   }
 
   const REVERSE_IMAGE_SEARCH_PROVIDERS = [
@@ -4459,6 +5076,168 @@
     document.getElementById('pe-reverse-image-search-slot')?.remove();
   }
 
+  // ─── Inject Hide/Unhide item into Pinterest native 3-dot/More menus ───
+  const NATIVE_MENU_TRIGGER_SELECTOR = [
+    '[data-test-id="context-menu-button"]',
+    '[data-test-id="ellipsis-button"]',
+    '[data-test-id="more-actions-button"]',
+    '[data-test-id="closeup-more-options"]',
+    '[data-test-id="closeup-action-bar-button"]',
+    'button[aria-label="More actions"]',
+  ].join(', ');
+
+  let _nativeMenuHideObs = null;
+  let _nativeMenuHideScan = null;
+  let _lastNativeMenuTrigger = null;
+
+  function isNativeMenuVisible(menu) {
+    if (!menu?.isConnected) return false;
+    const style = getComputedStyle(menu);
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+  }
+
+  function cleanupNativeMenuHideItems(root) {
+    root.querySelectorAll?.('[data-pe-native-menu-item="hide-pin"]').forEach(el => el.remove());
+  }
+
+  function resolveNativeMenuPinId(trigger) {
+    if (!trigger) return currentPinIdFromLocation();
+    const card = trigger.closest?.('[data-test-id="pin"], [data-test-id="pinWrapper"], [data-grid-item="true"]');
+    if (card) return getPinIdFromCard(card) || currentPinIdFromLocation();
+    if (trigger.closest?.(
+      '[data-test-id="closeup-action-items"], ' +
+      '[data-test-id="closeup-pin-action-items"], ' +
+      '[data-test-id="closeup-visual-container"], ' +
+      '[data-test-id="closeup-image"]'
+    )) return currentPinIdFromLocation();
+    return currentPinIdFromLocation();
+  }
+
+  function injectHidePinNativeMenuItem(menu) {
+    if (!menu?.querySelector) return;
+    if (!isNativeMenuVisible(menu)) return;
+    cleanupNativeMenuHideItems(menu);
+
+    const pinId = resolveNativeMenuPinId(_lastNativeMenuTrigger);
+    if (!pinId) return;
+
+    const hidden = isPinIdHidden(pinId);
+    const item = document.createElement('div');
+    item.setAttribute('role', 'menuitem');
+    item.setAttribute('tabindex', '0');
+    item.setAttribute('data-pe-ui', 'true');
+    item.setAttribute('data-pe-native-menu-item', 'hide-pin');
+    item.className = 'pe-native-menu-item';
+    item.innerHTML = `
+      <div class="pe-native-menu-item-inner">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/><line x1="4.22" y1="4.22" x2="19.78" y2="19.78"/>
+        </svg>
+        <span>${hidden ? 'Unhide pin' : 'Hide pin'}</span>
+      </div>
+    `;
+
+    function doAction(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation?.();
+      if (hidden) unhidePinId(pinId);
+      else {
+        hidePinId(pinId);
+        if (!get('hideByPinIdEnabled')) set('hideByPinIdEnabled', true);
+      }
+      refreshContentFilter();
+      showPowerMenuToast(hidden ? 'Pin unhidden' : 'Pin hidden');
+      // Close the native menu by dispatching Escape and blurring focus.
+      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      document.activeElement?.blur();
+    }
+
+    item.addEventListener('click', doAction, true);
+    item.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        doAction(e);
+      }
+    });
+
+    // Append at the end of the menu, inside a list if one exists.
+    const list = menu.matches('[role="menu"]') ? menu : menu.querySelector('[role="menu"]');
+    if (list) list.appendChild(item);
+  }
+
+  function scanNativeMenusForHideItem() {
+    const seen = new Set();
+    document.querySelectorAll('[role="menu"]').forEach(menu => {
+      seen.add(menu);
+      injectHidePinNativeMenuItem(menu);
+    });
+    // Some Pinterest menus expose menuitems without a wrapping role="menu".
+    document.querySelectorAll('[role="menuitem"]').forEach(item => {
+      const menu = item.closest('[role="menu"], [data-test-id*="menu"], [data-test-id*="dropdown"]') || item.parentElement;
+      if (menu && !seen.has(menu)) {
+        seen.add(menu);
+        injectHidePinNativeMenuItem(menu);
+      }
+    });
+  }
+
+  function resolveNativeMenuTrigger(target) {
+    if (!target) return null;
+    // 1) Hard-coded Pinterest selectors (current)
+    const direct = target.closest?.(NATIVE_MENU_TRIGGER_SELECTOR);
+    if (direct) return direct;
+    // 2) Structural fallback: a button inside a closeup action bar whose label
+    //    or text suggests "More actions". Pinterest changes data-test-ids often,
+    //    but the action-bar context and aria-label are more stable.
+    const actionBar = target.closest?.('[data-test-id="closeup-action-items"], [data-test-id="closeup-pin-action-items"]');
+    if (actionBar) {
+      const btn = target.closest?.('button');
+      if (btn) {
+        const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+        if (aria.includes('more') || aria.includes('actions')) return btn;
+      }
+    }
+    // 3) Heuristic fallback: any button whose visible text or aria-label says More.
+    const btn = target.closest?.('button');
+    if (btn) {
+      const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+      const text = (btn.textContent || '').trim().toLowerCase();
+      if (aria.includes('more actions') || text === 'more' || text === '...' || text === '…') return btn;
+    }
+    return null;
+  }
+
+  function initNativeMenuHideItem() {
+    if (hasObserver('nativeMenuHide')) return;
+    document.addEventListener('click', e => {
+      const trigger = resolveNativeMenuTrigger(e.target);
+      if (!trigger) return;
+      _lastNativeMenuTrigger = trigger;
+      if (!_nativeMenuHideScan) _nativeMenuHideScan = debounce(scanNativeMenusForHideItem, 50);
+      _nativeMenuHideScan();
+    }, true);
+    _nativeMenuHideObs = new MutationObserver(records => {
+      let shouldScan = false;
+      records.forEach(record => {
+        record.addedNodes?.forEach(node => {
+          if (node.nodeType !== 1) return;
+          if (node.matches?.('[role="menu"]') ||
+              node.querySelector?.('[role="menu"]') ||
+              node.querySelector?.('[role="menuitem"]')) {
+            shouldScan = true;
+          }
+        });
+      });
+      if (shouldScan) {
+        if (!_nativeMenuHideScan) _nativeMenuHideScan = debounce(scanNativeMenusForHideItem, 50);
+        _nativeMenuHideScan();
+      }
+    });
+    _nativeMenuHideObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('nativeMenuHide', _nativeMenuHideObs, { target: document.documentElement });
+  }
+
   function showReverseImageSearchMenu(anchor, imageUrl) {
     removeReverseImageSearchMenu();
     if (!imageUrl) return;
@@ -4504,18 +5283,17 @@
 
     const slot = document.createElement('div');
     slot.id = 'pe-reverse-image-search-slot';
-    slot.className = 'oRZ5_s';
-    slot.classList.add('pe-closeup-action-slot');
+    slot.className = 'pe-closeup-action-slot';
     if (IS_MOBILE) slot.classList.add('pe-mobile-closeup-action-slot');
     slot.dataset.peCloseupAction = 'reverse-search';
     slot.setAttribute('data-pe-ui', 'true');
     absorbCloseupActionEvents(slot);
 
     const item = document.createElement('div');
-    item.className = 'ADXRXN';
+    item.className = 'pe-closeup-action-item';
     item.setAttribute('role', 'listitem');
     item.innerHTML = `
-      <button id="pe-reverse-image-search-btn" class="euRXRl" type="button" aria-label="Reverse image search" title="Reverse image search">
+      <button id="pe-reverse-image-search-btn" class="pe-closeup-action-button" type="button" aria-label="Reverse image search" title="Reverse image search">
         <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true">
           <path d="M10.5 4a6.5 6.5 0 0 1 5.17 10.44l4.45 4.45-1.41 1.41-4.45-4.45A6.5 6.5 0 1 1 10.5 4zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zm8.5-4 .46 1.54L21 4l-1.54.46L19 6l-.46-1.54L17 4l1.54-.46z"/>
         </svg>
@@ -4555,19 +5333,100 @@
       return;
     }
     createReverseImageSearchButton();
-    if (_reverseImageSearchObs) return;
+    if (hasObserver('reverseImageSearch')) return;
     const retry = debounce(createReverseImageSearchButton, 150);
     _reverseImageSearchObs = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
       retry();
     });
     _reverseImageSearchObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('reverseImageSearch', _reverseImageSearchObs, { target: document.documentElement });
   }
 
 
   // ═══════════════════════════════════════════════════════════════════
   //  MODULE: BOARD DOWNLOADER
   // ═══════════════════════════════════════════════════════════════════
+  // ─── Board download history (separate from pe_settings_v1 to stay small) ───
+  const BOARD_HISTORY_KEY = 'pe_board_history';
+
+  function getBoardHistory() {
+    try { return JSON.parse(storageRead(BOARD_HISTORY_KEY) || '{}'); } catch { return {}; }
+  }
+
+  function saveBoardHistory(boardKey, newIds) {
+    const hist = getBoardHistory();
+    const existing = new Set(hist[boardKey] || []);
+    for (const id of newIds) if (id) existing.add(id);
+    hist[boardKey] = [...existing];
+    storageWrite(BOARD_HISTORY_KEY, JSON.stringify(hist));
+  }
+
+  // ─── Hidden pin IDs ("Don't show again") ───
+  const HIDDEN_PIN_IDS_KEY = 'pe_hidden_pin_ids';
+  let _hiddenPinIdsCache = null;
+
+  function loadHiddenPinIdsCache() {
+    try {
+      const arr = JSON.parse(storageRead(HIDDEN_PIN_IDS_KEY) || '[]');
+      _hiddenPinIdsCache = new Set(Array.isArray(arr) ? arr : []);
+    } catch { _hiddenPinIdsCache = new Set(); }
+    return _hiddenPinIdsCache;
+  }
+
+  function getHiddenPinIds() {
+    return _hiddenPinIdsCache || loadHiddenPinIdsCache();
+  }
+
+  function saveHiddenPinIds(set) {
+    try {
+      _hiddenPinIdsCache = new Set([...set].filter(Boolean));
+      storageWrite(HIDDEN_PIN_IDS_KEY, JSON.stringify([..._hiddenPinIdsCache]));
+    } catch (_) {}
+  }
+
+  function hidePinId(id) {
+    if (!id) return;
+    const set = getHiddenPinIds();
+    if (set.has(id)) return;
+    set.add(id);
+    saveHiddenPinIds(set);
+  }
+
+  function unhidePinId(id) {
+    if (!id) return;
+    const set = getHiddenPinIds();
+    if (!set.has(id)) return;
+    set.delete(id);
+    saveHiddenPinIds(set);
+  }
+
+  function isPinIdHidden(id) {
+    if (!id) return false;
+    return getHiddenPinIds().has(id);
+  }
+
+  function clearHiddenPinIds() {
+    saveHiddenPinIds(new Set());
+  }
+
+  function currentPinIdFromLocation() {
+    return location.pathname.match(/\/pin\/(\d+)/i)?.[1] || '';
+  }
+
+  function currentBoardKey() {
+    return location.pathname.replace(/\/$/, '').split('/').filter(Boolean).slice(0, 2).join('/');
+  }
+
+  function getBoardDisplayName() {
+    const header = document.querySelector(
+      '[data-test-id="board-header-with-image"] h1, [data-test-id="board-header-details"] h1, [data-test-id="board-tools"] h1'
+    );
+    const fromDom = header?.textContent?.trim();
+    if (fromDom) return sanitizeFilename(fromDom) || currentBoardKey();
+    return currentBoardKey();
+  }
+
   function isBoardPage() {
     // URL heuristic: /username/boardname/  (exactly 2 non-empty path segments)
     const parts = location.pathname.replace(/\/$/, '').split('/').filter(Boolean);
@@ -4584,29 +5443,59 @@
     return urlMatch || domMatch;
   }
 
+  // Pick the highest-quality pinimg URL available for an <img>:
+  // prefer srcset (largest descriptor), then data-src, then current src.
+  function getBestPinimgUrl(img) {
+    const candidates = [];
+    const srcset = img.getAttribute('srcset');
+    if (srcset) {
+      let bestUrl = '', bestVal = 0;
+      srcset.split(',').forEach(part => {
+        const [url, desc] = part.trim().split(/\s+/);
+        if (!url || !url.includes('i.pinimg.com')) return;
+        const val = parseFloat(desc) || 0;
+        if (val > bestVal) { bestVal = val; bestUrl = url; }
+      });
+      if (bestUrl) candidates.push(bestUrl);
+    }
+    const dataSrc = img.getAttribute('data-src');
+    if (dataSrc && dataSrc.includes('i.pinimg.com')) candidates.push(dataSrc);
+    if (img.src && img.src.includes('i.pinimg.com')) candidates.push(img.src);
+
+    // Prefer the largest dimensions in the URL path among the candidates.
+    let best = candidates[0] || '';
+    let bestSize = 0;
+    for (const url of candidates) {
+      const sizeMatch = url.match(/\/i\.pinimg\.com\/(\d+)x/);
+      const size = sizeMatch ? parseInt(sizeMatch[1], 10) : 0;
+      if (size > bestSize) { bestSize = size; best = url; }
+    }
+
+    // Upgrade sized URL to /originals/.
+    const m = best.match(OQ_RE);
+    return m ? m[1] + '/originals' + m[2] : best;
+  }
+
   // Snapshot whatever pin images are currently in the DOM into the
   // accumulator set.  Called repeatedly while scrolling so we catch
   // images before Pinterest's virtual list recycles those DOM nodes.
   // Also captures pin titles from title elements in each pin card.
   function snapshotPinUrls(seen, urls, names, ids) {
-    document.querySelectorAll('img[src*="i.pinimg.com"]').forEach(img => {
+    document.querySelectorAll('img[src*="i.pinimg.com"], img[data-src*="i.pinimg.com"]').forEach(img => {
       // Skip tiny avatars/icons
       const w = img.naturalWidth || img.width;
       if (w && w < 80) return;
       // Skip images inside the "More Ideas" / suggested section at the bottom of boards
       if (img.closest('.moreIdeasOnBoard, [href*="more-ideas"], [href*="/_tools/"]')) return;
-      let url = img.src;
-      const m = url.match(OQ_RE);
-      if (m) url = m[1] + '/originals' + m[2];
-      if (!seen.has(url)) {
-        const pinScope = img.closest(
-          '[data-test-id="pinWrapper"], [data-grid-item="true"], [data-test-id="pin"], div[role="listitem"]'
-        );
-        seen.add(url);
-        urls.push(url);
-        names.set(url, extractPinTitleFromScope(pinScope));
-        if (ids) ids.set(url, pinScope ? getPinIdFromCard(pinScope) : null);
-      }
+      const url = getBestPinimgUrl(img);
+      if (!url || seen.has(url)) return;
+      const pinScope = img.closest(
+        '[data-test-id="pinWrapper"], [data-grid-item="true"], [data-test-id="pin"], div[role="listitem"]'
+      );
+      seen.add(url);
+      urls.push(url);
+      names.set(url, extractPinTitleFromScope(pinScope));
+      if (ids) ids.set(url, pinScope ? getPinIdFromCard(pinScope) : null);
     });
   }
 
@@ -4628,10 +5517,11 @@
     });
   }
 
-  // Scroll to the bottom, snapshotting URLs at each tick so virtualised
-  // DOM nodes are captured before they get removed.  Returns accumulated
-  // URL array.  Stall threshold is intentionally generous (12 × 900ms =
-  // 10.8 s) because Pinterest's lazy load can pause for several seconds.
+  // Scroll to the bottom, snapshotting URLs as the DOM changes so virtualised
+  // DOM nodes are captured before they get removed. Uses MutationObserver to
+  // react to Pinterest's lazy loading instead of polling on a fixed interval.
+  // Stall threshold is intentionally generous (12 idle scrolls) because lazy
+  // load can pause for several seconds.
   async function autoScrollAndCollect(setStatus) {
     const seen     = new Set();
     const urls     = [];
@@ -4641,26 +5531,50 @@
     const vidItems = [];
     return new Promise(resolve => {
       let lastH = 0, stall = 0;
-      const t = setInterval(() => {
-        snapshotPinUrls(seen, urls, names, ids);       // grab current DOM before scroll
+      let idleTimer = null;
+      let finished = false;
+
+      function finish() {
+        if (finished) return;
+        finished = true;
+        clearTimeout(idleTimer);
+        obs.disconnect();
+        snapshotPinUrls(seen, urls, names, ids);   // final grab
+        snapshotVideoUrls(vidSeen, vidItems);
+        window.scrollTo(0, 0);
+        resolve({ urls, names, ids, vidItems });
+      }
+
+      function tick() {
+        if (finished) return;
+        clearTimeout(idleTimer);
+        snapshotPinUrls(seen, urls, names, ids);
         snapshotVideoUrls(vidSeen, vidItems);
         window.scrollTo(0, document.body.scrollHeight);
         const h = document.body.scrollHeight;
         setStatus('scroll', urls.length + vidItems.length, 0);
         if (h === lastH) {
           stall++;
-          if (stall >= 12) {
-            snapshotPinUrls(seen, urls, names, ids);   // final grab
-            snapshotVideoUrls(vidSeen, vidItems);
-            clearInterval(t);
-            window.scrollTo(0, 0);
-            resolve({ urls, names, ids, vidItems });
-          }
+          if (stall >= 12) { finish(); return; }
         } else {
           stall = 0;
           lastH = h;
         }
-      }, 900);
+        idleTimer = setTimeout(tick, 1200);
+      }
+
+      // Snapshot immediately when Pinterest adds new nodes, then wait briefly
+      // for the lazy-load batch to settle before scrolling again.
+      const obs = new MutationObserver(() => {
+        if (finished) return;
+        clearTimeout(idleTimer);
+        snapshotPinUrls(seen, urls, names, ids);
+        snapshotVideoUrls(vidSeen, vidItems);
+        idleTimer = setTimeout(tick, 400);
+      });
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+
+      tick();
     });
   }
 
@@ -4670,14 +5584,15 @@
     return autoScrollAndCollect(setStatus);
   }
 
-  // Fetch up to `concurrency` URLs in parallel, calling onProgress after each.
+  // Fetch up to `concurrency` image URLs in parallel, trying originals first
+  // and falling back to smaller sizes when the original is unavailable.
   async function fetchParallel(urls, concurrency, onProgress) {
     const results = new Array(urls.length).fill(null);
     let nextIdx = 0, finished = 0;
     async function worker() {
       while (nextIdx < urls.length) {
         const i = nextIdx++;
-        try { results[i] = await fetchBinary(urls[i]); } catch (_) {}
+        try { results[i] = await fetchBestImageBuffer(urls[i]); } catch (_) {}
         onProgress(++finished, urls.length);
       }
     }
@@ -4685,69 +5600,467 @@
     return results;
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  //  MINIMAL ZIP WRITER (STORE + raw DEFLATE when available)
+  // ═══════════════════════════════════════════════════════════════════
+  // Generates a valid .zip file from an array of { name, buffer } entries.
+  // Uses STORE (compression method 0) by default, but compresses with raw
+  // DEFLATE (method 8) via CompressionStream when the browser supports it
+  // and the result is smaller. Falls back to STORE on older browsers.
+
+  function makeCrc32Table() {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) {
+        c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      table[i] = c >>> 0;
+    }
+    return table;
+  }
+  const _crc32Table = makeCrc32Table();
+
+  function crc32(buffer) {
+    const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) {
+      crc = _crc32Table[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function writeUint16(v) { return new Uint8Array([v & 0xFF, (v >>> 8) & 0xFF]); }
+  function writeUint32(v) { return new Uint8Array([v & 0xFF, (v >>> 8) & 0xFF, (v >>> 16) & 0xFF, (v >>> 24) & 0xFF]); }
+
+  // Normalize a value from GM_xmlhttpRequest / fetch to an ArrayBuffer.
+  function toArrayBuffer(value) {
+    if (value instanceof ArrayBuffer) return value;
+    if (value?.buffer instanceof ArrayBuffer) return value.buffer;
+    return null;
+  }
+
+  function concatArrays(arrays) {
+    let total = 0;
+    arrays.forEach(a => { total += a.byteLength || a.length; });
+    const out = new Uint8Array(total);
+    let offset = 0;
+    arrays.forEach(a => {
+      const src = a instanceof Uint8Array ? a : new Uint8Array(a);
+      out.set(src, offset);
+      offset += src.byteLength;
+    });
+    return out;
+  }
+
+  // Compress a single entry using the browser's raw DEFLATE stream when
+  // available and when it actually reduces size. Falls back to STORE.
+  function supportsRawDeflate() {
+    if (typeof CompressionStream !== 'function') return false;
+    try {
+      new CompressionStream('deflate-raw');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function compressZipEntry(data) {
+    if (typeof CompressionStream === 'function') {
+      try {
+        const cs = new CompressionStream('deflate-raw');
+        const writer = cs.writable.getWriter();
+        writer.write(data);
+        writer.close();
+        const chunks = [];
+        const reader = cs.readable.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+        }
+        const compressed = concatArrays(chunks);
+        if (compressed.byteLength < data.byteLength) {
+          return { data: compressed, method: 8 };
+        }
+      } catch (_) {}
+    }
+    return { data, method: 0 };
+  }
+
+  // Streaming ZIP writer: add entries one at a time and finalize at the end.
+  // This keeps peak memory low because source buffers can be released between
+  // chunks instead of holding every file in memory until the archive is built.
+  class StreamingZipWriter {
+    constructor() {
+      this.parts = [];
+      this.centralHeaders = [];
+      this.centralOffset = 0;
+      this.entryCount = 0;
+      this.totalUncompressed = 0;
+    }
+
+    async addEntry(name, buffer) {
+      const nameBytes = new TextEncoder().encode(name);
+      const raw = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+      const uncompressedSize = raw.byteLength;
+      this.totalUncompressed += uncompressedSize;
+      const checksum = crc32(raw);
+      const { data: compressedData, method } = await compressZipEntry(raw);
+      const compressedSize = compressedData.byteLength;
+
+      const localHeader = concatArrays([
+        writeUint32(0x04034B50),
+        writeUint16(20),
+        writeUint16(method === 8 ? 2 : 0),
+        writeUint16(method),
+        writeUint16(0),
+        writeUint16(0),
+        writeUint32(checksum),
+        writeUint32(compressedSize),
+        writeUint32(uncompressedSize),
+        writeUint16(nameBytes.length),
+        writeUint16(0),
+        nameBytes,
+      ]);
+      this.parts.push(localHeader, compressedData);
+
+      const centralHeader = concatArrays([
+        writeUint32(0x02014B50),
+        writeUint16(20),
+        writeUint16(20),
+        writeUint16(method === 8 ? 2 : 0),
+        writeUint16(method),
+        writeUint16(0),
+        writeUint16(0),
+        writeUint32(checksum),
+        writeUint32(compressedSize),
+        writeUint32(uncompressedSize),
+        writeUint16(nameBytes.length),
+        writeUint16(0),
+        writeUint16(0),
+        writeUint16(0),
+        writeUint16(0),
+        writeUint32(0),
+        writeUint32(this.centralOffset),
+        nameBytes,
+      ]);
+      this.centralHeaders.push(centralHeader);
+      this.centralOffset += localHeader.byteLength + compressedSize;
+      this.entryCount++;
+    }
+
+    finalize() {
+      const centralDir = concatArrays(this.centralHeaders);
+      const eocd = concatArrays([
+        writeUint32(0x06054B50),
+        writeUint16(0),
+        writeUint16(0),
+        writeUint16(this.entryCount),
+        writeUint16(this.entryCount),
+        writeUint32(centralDir.byteLength),
+        writeUint32(this.centralOffset),
+        writeUint16(0),
+      ]);
+      this.parts.push(centralDir, eocd);
+      return new Blob(this.parts, { type: 'application/zip' });
+    }
+  }
+
+  // Build a zip Blob from entries. Names should be forward-slash paths.
+  // Uses Blob parts instead of one giant Uint8Array to avoid memory mishaps.
+  // Compresses entries with raw DEFLATE when supported, otherwise STORE.
+  async function createZip(entries) {
+    const parts = [];
+    const centralHeaders = [];
+    let centralOffset = 0;
+
+    for (const entry of entries) {
+      const nameBytes = new TextEncoder().encode(entry.name);
+      const buf = toArrayBuffer(entry.buffer);
+      if (!buf) throw new Error('invalid buffer for ' + entry.name);
+      const raw = new Uint8Array(buf);
+      const uncompressedSize = raw.byteLength;
+      const checksum = crc32(raw);
+      const { data: compressedData, method } = await compressZipEntry(raw);
+      const compressedSize = compressedData.byteLength;
+
+      const localHeader = concatArrays([
+        writeUint32(0x04034B50),      // Local file header signature
+        writeUint16(20),              // Version needed (2.0)
+        writeUint16(method === 8 ? 2 : 0), // General purpose bit flag
+        writeUint16(method),          // Compression method
+        writeUint16(0),               // File last modification time
+        writeUint16(0),               // File last modification date
+        writeUint32(checksum),        // CRC-32
+        writeUint32(compressedSize),  // Compressed size
+        writeUint32(uncompressedSize),// Uncompressed size
+        writeUint16(nameBytes.length),// File name length
+        writeUint16(0),               // Extra field length
+        nameBytes,
+      ]);
+      parts.push(localHeader, compressedData);
+
+      const centralHeader = concatArrays([
+        writeUint32(0x02014B50),      // Central directory header signature
+        writeUint16(20),              // Version made by
+        writeUint16(20),              // Version needed
+        writeUint16(method === 8 ? 2 : 0), // Flags
+        writeUint16(method),          // Compression method
+        writeUint16(0),               // Modification time
+        writeUint16(0),               // Modification date
+        writeUint32(checksum),
+        writeUint32(compressedSize),
+        writeUint32(uncompressedSize),
+        writeUint16(nameBytes.length),
+        writeUint16(0),               // Extra field length
+        writeUint16(0),               // Comment length
+        writeUint16(0),               // Disk number start
+        writeUint16(0),               // Internal file attributes
+        writeUint32(0),               // External file attributes
+        writeUint32(centralOffset),   // Relative offset of local header
+        nameBytes,
+      ]);
+      centralHeaders.push(centralHeader);
+      centralOffset += localHeader.byteLength + compressedSize;
+    }
+
+    const centralDir = concatArrays(centralHeaders);
+    const eocd = concatArrays([
+      writeUint32(0x06054B50),        // EOCD signature
+      writeUint16(0),                 // Disk number
+      writeUint16(0),                 // Disk with central directory
+      writeUint16(entries.length),    // Central directory entries on this disk
+      writeUint16(entries.length),    // Total central directory entries
+      writeUint32(centralDir.byteLength),
+      writeUint32(centralOffset),
+      writeUint16(0),                 // Comment length
+    ]);
+
+    parts.push(centralDir, eocd);
+    return new Blob(parts, { type: 'application/zip' });
+  }
+
+
+  // Large-board safety limits.
+  const BOARD_ZIP_MAX_PINS = 2000;
+  const BOARD_ZIP_MAX_BYTES = 1.5 * 1024 * 1024 * 1024; // 1.5 GB uncompressed
+  const BOARD_ZIP_CHUNK_SIZE = 100;
+
   // ─── Save all board images + videos as named downloads ──────────
-  async function downloadBoardFolder(setStatus) {
+  async function downloadBoardFolder(setStatus, { newOnly = false, zip = false } = {}) {
     const { urls, names, ids, vidItems } = await collectAllPins(setStatus);
-    const totalItems = urls.length + vidItems.length;
+    if (!urls.length && !vidItems.length) { alert('[Pinterest Power Menu] No images or videos found on this board.'); return; }
+
+    // Filter to only new pins when requested and tracking is enabled
+    const tracking = get('boardDownloadTrack');
+    let dlUrls = urls, dlVids = vidItems, skipped = 0;
+    if (newOnly && tracking) {
+      const boardKey = currentBoardKey();
+      const seen = new Set(getBoardHistory()[boardKey] || []);
+      dlUrls = urls.filter(u => { const id = ids.get(u); if (id && seen.has(id)) { skipped++; return false; } return true; });
+      dlVids = vidItems.filter(vi => { if (vi.pinId && seen.has(vi.pinId)) { skipped++; return false; } return true; });
+    }
+
+    const totalItems = dlUrls.length + dlVids.length;
+    if (!totalItems && skipped > 0) { setStatus('done', { saved: 0, failed: 0, skipped }); return; }
     if (!totalItems) { alert('[Pinterest Power Menu] No images or videos found on this board.'); return; }
+
+    if (totalItems > BOARD_ZIP_MAX_PINS) {
+      alert(`[Pinterest Power Menu] This board has ${totalItems} items, which exceeds the safety limit of ${BOARD_ZIP_MAX_PINS}. Please use "Download All" to save files individually, or narrow the board.`);
+      setStatus('done', { saved: 0, failed: 0, skipped });
+      return;
+    }
+
+    let useZip = zip;
+
+    // On mobile, if raw DEFLATE is unsupported we fall back to individual
+    // downloads rather than produce a potentially broken zip.
+    if (useZip && IS_MOBILE && !supportsRawDeflate()) {
+      useZip = false;
+      showPowerMenuToast('ZIP compression is not supported on this browser. Downloading files individually.');
+    }
 
     // Prefer the pin title. If unavailable, fall back to the pin's real ID
     // ("Pin - 901212575447549382") taken from its grid card link, matching the
     // single-pin page. Only use a random name when neither title nor ID exists.
     function makeFileName(url, ext) {
-      let pinName = stripKnownExt(sanitizeFilename(names.get(url) || ''));
-      if (!pinName) {
-        const id = ids.get(url);
-        pinName = id ? `Pin - ${id}` : makeFallbackPinName();
-      }
+      let pinName = buildPinFilename(
+        stripKnownExt(sanitizeFilename(names.get(url) || '')) || '',
+        ids.get(url) || '', get('boardFilenameStrategy'));
       if (pinName.length > 120) pinName = pinName.slice(0, 120).trimEnd();
       return `${pinName}${ext}`;
     }
-
-    // ── Download board image files ────────────────────────────────
-    const bufs = await fetchParallel(urls, 5, (done, _) =>
-      setStatus('fetch', done, totalItems)
-    );
-
-    let saved = 0;
-    for (let i = 0; i < bufs.length; i++) {
-      const buf = bufs[i];
-      if (!buf) continue;
-      const ext      = detectFileType(new Uint8Array(buf));
-      const fileName = makeFileName(urls[i], ext);
-      try {
-        const a    = document.createElement('a');
-        a.href     = URL.createObjectURL(new Blob([buf]));
-        a.download = fileName;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 200);
-        await new Promise(r => setTimeout(r, 300));
-        saved++;
-        bumpStat('statShowImagesDownloaded', 'statCountImagesDownloaded');
-      } catch (_) {}
-      setStatus('fetch', saved, totalItems);
+    function makeVideoFileName(vi) {
+      let pinName = buildPinFilename(
+        stripKnownExt(sanitizeFilename(vi.title || '')) || '',
+        vi.pinId || '', get('boardFilenameStrategy'));
+      if (pinName.length > 120) pinName = pinName.slice(0, 120).trimEnd();
+      return `${pinName}.mp4`;
     }
 
-    // ── Download videos ───────────────────────────────────────────
-    for (const vi of vidItems) {
-      const fallbackUrls = vi.channel === 'mc'
-        ? [
-            `https://v1.pinimg.com/videos/mc/720p/${vi.hash}.mp4`,
-            `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t4.mp4`,
-            `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t3.mp4`,
-            `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t2.mp4`,
-            `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t1.mp4`,
-          ]
-        : [`https://v1.pinimg.com/videos/iht/expMp4/${vi.hash}_720w.mp4`];
-      const title = stripKnownExt(sanitizeFilename(vi.title || '')) || (vi.pinId ? `Pin - ${vi.pinId}` : makeFallbackPinName());
-      try {
-        await downloadVideoFile(fallbackUrls, title, null);
-        saved++;
-      } catch (_) {}
-      setStatus('fetch', saved, totalItems);
+    // Ensure unique filenames inside a zip by appending (1), (2), etc.
+    function uniqueFileName(name, used) {
+      if (!used.has(name)) { used.add(name); return name; }
+      const ext = name.includes('.') ? name.slice(name.lastIndexOf('.')) : '';
+      const base = ext ? name.slice(0, -ext.length) : name;
+      let n = 1;
+      let candidate;
+      do { candidate = `${base} (${n++})${ext}`; } while (used.has(candidate));
+      used.add(candidate);
+      return candidate;
     }
 
-    setStatus('done', saved, totalItems);
+    let saved = 0, failed = 0;
+    const savedIds = [];
+
+    if (useZip) {
+      // ── Streaming ZIP: process images and videos in chunks so we never hold
+      //    every file in memory at once. Source buffers go out of scope after
+      //    each chunk.
+      const writer = new StreamingZipWriter();
+      const usedNames = new Set();
+
+      for (let start = 0; start < dlUrls.length; start += BOARD_ZIP_CHUNK_SIZE) {
+        const chunk = dlUrls.slice(start, start + BOARD_ZIP_CHUNK_SIZE);
+        const bufs = await fetchParallel(chunk, IS_MOBILE ? 2 : 5, (done, _) =>
+          setStatus('fetch', saved + done, totalItems)
+        );
+        for (let i = 0; i < bufs.length; i++) {
+          const url = chunk[i];
+          let buf = toArrayBuffer(bufs[i]);
+          if (!buf) { failed++; continue; }
+          const ext = detectFileType(new Uint8Array(buf));
+          // Skip WebP→PNG conversion in ZIP mode to save memory; keep originals.
+          const name = uniqueFileName(makeFileName(url, ext), usedNames);
+          try {
+            await writer.addEntry(name, buf);
+            saved++;
+            const pinId = ids.get(url);
+            if (pinId) savedIds.push(pinId);
+            bumpStat('statShowImagesDownloaded', 'statCountImagesDownloaded');
+          } catch (_) { failed++; }
+          setStatus('fetch', saved, totalItems);
+          if (writer.totalUncompressed > BOARD_ZIP_MAX_BYTES) {
+            alert(`[Pinterest Power Menu] Board exceeds the ${(BOARD_ZIP_MAX_BYTES / 1024 / 1024 / 1024).toFixed(1)} GB uncompressed size limit. Stopping ZIP download.`);
+            setStatus('done', { saved, failed, skipped });
+            return;
+          }
+        }
+        if (IS_MOBILE) await schedulerYield();
+      }
+
+      for (let start = 0; start < dlVids.length; start += BOARD_ZIP_CHUNK_SIZE) {
+        const chunk = dlVids.slice(start, start + BOARD_ZIP_CHUNK_SIZE);
+        for (const vi of chunk) {
+          const fallbackUrls = vi.channel === 'mc'
+            ? [
+                `https://v1.pinimg.com/videos/mc/720p/${vi.hash}.mp4`,
+                `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t4.mp4`,
+                `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t3.mp4`,
+                `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t2.mp4`,
+                `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t1.mp4`,
+              ]
+            : [`https://v1.pinimg.com/videos/iht/expMp4/${vi.hash}_720w.mp4`];
+          try {
+            const vbuf = toArrayBuffer(await fetchVideoBuffer(fallbackUrls, null));
+            if (!vbuf) { failed++; continue; }
+            const name = uniqueFileName(makeVideoFileName(vi), usedNames);
+            await writer.addEntry(name, vbuf);
+            saved++;
+            if (vi.pinId) savedIds.push(vi.pinId);
+            setStatus('fetch', saved, totalItems);
+            if (writer.totalUncompressed > BOARD_ZIP_MAX_BYTES) {
+              alert(`[Pinterest Power Menu] Board exceeds the ${(BOARD_ZIP_MAX_BYTES / 1024 / 1024 / 1024).toFixed(1)} GB uncompressed size limit. Stopping ZIP download.`);
+              setStatus('done', { saved, failed, skipped });
+              return;
+            }
+          } catch (_) { failed++; }
+          setStatus('fetch', saved, totalItems);
+        }
+        if (IS_MOBILE) await schedulerYield();
+      }
+
+      if (writer.entryCount) {
+        try {
+          const zipBlob = writer.finalize();
+          const boardName = getBoardDisplayName() || 'board';
+          const zipName = `${boardName}.zip`;
+          const a = document.createElement('a');
+          const url = URL.createObjectURL(zipBlob);
+          a.href = url;
+          a.download = zipName;
+          triggerAnchorDownload(a, url, 10000);
+          bumpStat('statShowVideosDownloaded', 'statCountVideosDownloaded');
+        } catch (_) { failed += writer.entryCount; saved -= writer.entryCount; }
+      }
+    } else {
+      // ── Download board image files ────────────────────────────────
+      const bufs = await fetchParallel(dlUrls, IS_MOBILE ? 2 : 5, (done, _) =>
+        setStatus('fetch', done, totalItems)
+      );
+
+      // Process images: detect extension and optionally convert WebP → PNG
+      const imageItems = [];
+      for (let i = 0; i < bufs.length; i++) {
+        let buf = toArrayBuffer(bufs[i]);
+        if (!buf) { failed++; continue; }
+        let ext = detectFileType(new Uint8Array(buf));
+        if (get('convertWebpToPng') && ext === '.webp') {
+          const converted = toArrayBuffer(await convertImageBuffer(buf, '.webp', '.png'));
+          if (converted && converted !== buf) {
+            buf = converted;
+            ext = '.png';
+          }
+        }
+        imageItems.push({ url: dlUrls[i], buf, ext });
+        if (IS_MOBILE && i % 4 === 3) await schedulerYield();
+      }
+
+      // ── Save images one by one ──────────────────────────────────
+      for (const item of imageItems) {
+        const fileName = makeFileName(item.url, item.ext);
+        try {
+          const a = document.createElement('a');
+          const url = URL.createObjectURL(new Blob([item.buf]));
+          a.href = url;
+          a.download = fileName;
+          triggerAnchorDownload(a, url, IS_MOBILE ? 2000 : 200);
+          await new Promise(r => setTimeout(r, 300));
+          saved++;
+          const pinId = ids.get(item.url);
+          if (pinId) savedIds.push(pinId);
+          bumpStat('statShowImagesDownloaded', 'statCountImagesDownloaded');
+          if (IS_MOBILE) await schedulerYield();
+        } catch (_) { failed++; }
+        setStatus('fetch', saved, totalItems);
+      }
+
+      // ── Save videos one by one (preserves mobile blob streaming) ─
+      for (let i = 0; i < dlVids.length; i++) {
+        const vi = dlVids[i];
+        const fallbackUrls = vi.channel === 'mc'
+          ? [
+              `https://v1.pinimg.com/videos/mc/720p/${vi.hash}.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t4.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t3.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t2.mp4`,
+              `https://v1.pinimg.com/videos/mc/expMp4/${vi.hash}_t1.mp4`,
+            ]
+          : [`https://v1.pinimg.com/videos/iht/expMp4/${vi.hash}_720w.mp4`];
+        const title = makeVideoFileName(vi);
+        try {
+          await downloadVideoFile(fallbackUrls, title, null);
+          saved++;
+          if (vi.pinId) savedIds.push(vi.pinId);
+        } catch (_) { failed++; }
+        setStatus('fetch', saved, totalItems);
+        if (IS_MOBILE) await schedulerYield();
+      }
+    }
+
+    if (tracking && savedIds.length) saveBoardHistory(currentBoardKey(), savedIds);
+    setStatus('done', { saved, failed, skipped });
   }
 
   // ─── Board downloader button (lives inside #pe-settings-wrap) ───
@@ -4770,6 +6083,9 @@
     fab.id = 'pe-bd-fab';
     fab.setAttribute('data-pe-ui', 'true');
 
+    const DL_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 19v2h14v-2H5z"/></svg>`;
+    const SPARK_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/></svg>`;
+
     // Popup menu (appears above the button)
     const menu = document.createElement('div');
     menu.id = 'pe-bd-menu';
@@ -4777,10 +6093,20 @@
     menu.innerHTML = `
       <div id="pe-bd-status" style="display:none"></div>
       <button class="pe-bd-opt" id="pe-bd-folder">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-          <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 19v2h14v-2H5z"/>
-        </svg>
+        ${DL_ICON}
         Download All
+      </button>
+      <button class="pe-bd-opt" id="pe-bd-folder-zip">
+        ${DL_ICON}
+        Download All as ZIP
+      </button>
+      <button class="pe-bd-opt" id="pe-bd-new" style="display:none">
+        ${SPARK_ICON}
+        Download New
+      </button>
+      <button class="pe-bd-opt" id="pe-bd-new-zip" style="display:none">
+        ${SPARK_ICON}
+        Download New as ZIP
       </button>
     `;
 
@@ -4794,8 +6120,20 @@
     fab.appendChild(btn);
     document.body.appendChild(fab);
 
-    const status = menu.querySelector('#pe-bd-status');
-    const dirBtn = menu.querySelector('#pe-bd-folder');
+    const statusEl = menu.querySelector('#pe-bd-status');
+    const dirBtn   = menu.querySelector('#pe-bd-folder');
+    const dirZipBtn = menu.querySelector('#pe-bd-folder-zip');
+    const newBtn   = menu.querySelector('#pe-bd-new');
+    const newZipBtn = menu.querySelector('#pe-bd-new-zip');
+    const allBtns = [dirBtn, dirZipBtn, newBtn, newZipBtn];
+
+    // Show "Download New" buttons only when tracking is enabled
+    function syncNewBtns() {
+      const show = get('boardDownloadTrack') ? '' : 'none';
+      newBtn.style.display = show;
+      newZipBtn.style.display = show;
+    }
+    syncNewBtns();
 
     let menuOpen = false;
     function toggleMenu() {
@@ -4809,31 +6147,89 @@
       if (menuOpen && !fab.contains(e.target)) { menuOpen = false; menu.style.display = 'none'; }
     }
     document.addEventListener('click', onOutsideClick);
-    // Store cleanup on fab so removeBoardDownloaderUI can detach the listener
-    fab._bdCleanup = () => document.removeEventListener('click', onOutsideClick);
+
+    // Re-sync "Download New" visibility when the tracking setting changes
+    function onSettingChange(e) {
+      if (e.detail && e.detail.key === 'boardDownloadTrack') syncNewBtns();
+    }
+    document.addEventListener('pe-setting-change', onSettingChange);
+
+    // Store cleanup on fab so removeBoardDownloaderUI can detach the listeners
+    fab._bdCleanup = () => {
+      document.removeEventListener('click', onOutsideClick);
+      document.removeEventListener('pe-setting-change', onSettingChange);
+    };
+
+    let doneTimer = null;
 
     function setStatus(phase, a, b) {
       if (phase === 'cancelled') {
-        status.style.display = 'none';
-        dirBtn.disabled = false;
+        statusEl.style.display = 'none';
+        allBtns.forEach(b => b.disabled = false);
         return;
       }
-      status.style.display = 'block';
-      if (phase === 'scroll')      status.textContent = `Scrolling… ${a} items found`;
-      else if (phase === 'fetch')  status.textContent = `Saving ${a}/${b} (${b ? Math.round(a/b*100) : 0}%)`;
-      else if (phase === 'done') {
-        status.textContent = `✓ Done – ${a} files saved`;
-        setTimeout(() => {
-          status.style.display = 'none';
-          dirBtn.disabled = false;
-          menuOpen = false; menu.style.display = 'none';
-        }, 3000);
+      statusEl.style.display = 'block';
+      if (phase === 'scroll') {
+        statusEl.innerHTML = '';
+        statusEl.style.cssText = 'display:block;background:#f8f8f8;font-size:11px;text-align:center;padding:6px 10px;color:#555';
+        statusEl.textContent = `Scrolling… ${a} items found`;
+      } else if (phase === 'fetch') {
+        statusEl.style.cssText = 'display:block;background:#f8f8f8;font-size:11px;text-align:center;padding:6px 10px;color:#555';
+        statusEl.textContent = `Saving ${a}/${b} (${b ? Math.round(a/b*100) : 0}%)`;
+      } else if (phase === 'done') {
+        const { saved, failed, skipped } = typeof a === 'object' ? a : { saved: a, failed: 0, skipped: 0 };
+        if (doneTimer) clearTimeout(doneTimer);
+
+        // Build popup HTML
+        let statsHtml = `<span style="color:#2e7d32">✓ ${saved} saved</span>`;
+        if (failed > 0)  statsHtml += `&ensp;<span style="color:#c62828">✗ ${failed} failed</span>`;
+        if (skipped > 0) statsHtml += `&ensp;<span style="color:#888">⊘ ${skipped} already downloaded</span>`;
+
+        statusEl.style.cssText = 'display:block;background:#fff;border:1px solid #e0e0e0;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.12);padding:10px 12px;position:relative;margin-bottom:6px';
+        statusEl.innerHTML = `
+          <button id="pe-bd-close" title="Close" style="position:absolute;top:4px;right:6px;background:none;border:none;cursor:pointer;font-size:14px;color:#999;line-height:1;padding:0">✕</button>
+          <div style="font-weight:600;font-size:12px;color:#333;margin-bottom:4px">Download Complete</div>
+          <div style="font-size:11px;line-height:1.5">${statsHtml}</div>
+        `;
+
+        statusEl.querySelector('#pe-bd-close').addEventListener('click', () => {
+          if (doneTimer) { clearTimeout(doneTimer); doneTimer = null; }
+          closePopup();
+        });
+
+        function closePopup() {
+          statusEl.style.display = 'none';
+          allBtns.forEach(b => b.disabled = false);
+          menuOpen = false;
+          menu.style.display = 'none';
+        }
+
+        doneTimer = setTimeout(closePopup, 5000);
       }
     }
 
     dirBtn.addEventListener('click', async () => {
-      dirBtn.disabled = true;
-      await downloadBoardFolder(setStatus);
+      allBtns.forEach(b => b.disabled = true);
+      await downloadBoardFolder(setStatus, { newOnly: false, zip: false });
+      allBtns.forEach(b => b.disabled = false);
+    });
+
+    dirZipBtn.addEventListener('click', async () => {
+      allBtns.forEach(b => b.disabled = true);
+      await downloadBoardFolder(setStatus, { newOnly: false, zip: true });
+      allBtns.forEach(b => b.disabled = false);
+    });
+
+    newBtn.addEventListener('click', async () => {
+      allBtns.forEach(b => b.disabled = true);
+      await downloadBoardFolder(setStatus, { newOnly: true, zip: false });
+      allBtns.forEach(b => b.disabled = false);
+    });
+
+    newZipBtn.addEventListener('click', async () => {
+      allBtns.forEach(b => b.disabled = true);
+      await downloadBoardFolder(setStatus, { newOnly: true, zip: true });
+      allBtns.forEach(b => b.disabled = false);
     });
   }
 
@@ -4863,6 +6259,47 @@
       if (/v1\.pinimg\.com\/videos/.test(u)) return u;
     }
     return null;
+  }
+
+  // Fetch a video file into memory, trying URLs in order.
+  // Returns the ArrayBuffer on success; rejects if every URL fails.
+  function fetchVideoBuffer(urls, onProgress) {
+    return new Promise((resolve, reject) => {
+      let idx = 0;
+      function tryNext() {
+        if (idx >= urls.length) { reject(new Error('all URLs failed')); return; }
+        const url = urls[idx++];
+        let settled = false;
+        let timer;
+        function finish(fn) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          fn();
+        }
+        const req = GM_xmlhttpRequest({
+          method: 'GET', url,
+          responseType: 'arraybuffer',
+          headers: {
+            'Referer':    location.href,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept':     'video/mp4,video/*;q=0.9,*/*;q=0.8',
+          },
+          onprogress: e => { if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total); },
+          onload: r => {
+            if (r.status >= 200 && r.status < 300) {
+              finish(() => resolve(r.response));
+            } else {
+              finish(tryNext);
+            }
+          },
+          onerror:   () => finish(tryNext),
+          ontimeout: () => finish(tryNext),
+        });
+        timer = setTimeout(() => finish(() => { try { req.abort(); } catch(_){} tryNext(); }), 45000);
+      }
+      tryNext();
+    });
   }
 
   // Download a video file with progress feedback.
@@ -4900,11 +6337,10 @@
                 const base = stripKnownExt(sanitizeFilename(filename || '')) || makeFallbackPinName();
                 const blob = IS_MOBILE ? r.response : new Blob([r.response], { type: 'video/mp4' });
                 const a    = document.createElement('a');
-                a.href     = URL.createObjectURL(blob);
+                const url  = URL.createObjectURL(blob);
+                a.href     = url;
                 a.download = base + '.mp4';
-                document.body.appendChild(a);
-                a.click();
-                setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
+                triggerAnchorDownload(a, url, 10000);
                 bumpStat('statShowVideosDownloaded', 'statCountVideosDownloaded');
                 resolve();
               });
@@ -4938,12 +6374,15 @@
   let _customLogoObs = null;
   let _customLogoRescan = null;
 
-  function normalizeCustomLogoUrl(value) {
+  // Accepts only http(s), data:image and blob: URLs; everything else -> ''.
+  // Shared by the logo swap, per-button images and theme backgrounds.
+  function normalizeImageUrl(value) {
     const url = String(value || '').trim();
     if (!url) return '';
     if (/^(https?:\/\/|data:image\/|blob:)/i.test(url)) return url;
     return '';
   }
+  const normalizeCustomLogoUrl = normalizeImageUrl;
 
   function getCustomPinterestLogoSize() {
     const size = Number(get('customPinterestLogoSize'));
@@ -4995,7 +6434,7 @@
   }
 
   function stopCustomPinterestLogo() {
-    if (_customLogoObs) { _customLogoObs.disconnect(); _customLogoObs = null; }
+    if (_customLogoObs) { _customLogoObs.disconnect(); _customLogoObs = null; unregisterObserver('customLogo'); }
     removeCustomPinterestLogo(document);
   }
 
@@ -5010,13 +6449,388 @@
       return;
     }
     applyCustomPinterestLogo(document);
-    if (_customLogoObs) return;
+    if (hasObserver('customLogo')) return;
     _customLogoRescan = debounce(() => applyCustomPinterestLogo(document), 250);
     _customLogoObs = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
       _customLogoRescan();
     });
     _customLogoObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('customLogo', _customLogoObs, { target: document.documentElement });
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  MODULE: CUSTOM NAV-BUTTON IMAGES
+  // ═══════════════════════════════════════════════════════════════════
+  // Generalizes the logo swap to every nav button: hides the button's <svg>
+  // and overlays a user-chosen <img>. Each button has its own url/size/circle,
+  // stored under the customNavImages config object. Works on desktop + mobile.
+  //
+  // selector  = element whose icon frame holds the <svg> (desktop & mobile)
+  // frameSel  = the inner box to size the image to (varies desktop vs mobile)
+  const NAV_BUTTONS = [
+    { id: 'home',     label: 'Home',        desktop: '[data-test-id="home-tab"]',                          mobile: '[data-test-id="nav-bar-home"]' },
+    { id: 'explore',  label: 'Explore',     desktop: '[data-test-id="today-tab"]',                         mobile: null },
+    { id: 'search',   label: 'Search',      desktop: null,                                                 mobile: '[data-test-id="nav-bar-magnifying-glass"]' },
+    { id: 'boards',   label: 'Your boards', desktop: '[data-test-id="boards-tab"]',                        mobile: null },
+    { id: 'create',   label: 'Create',      desktop: '[data-test-id="create-tab"]',                        mobile: null },
+    { id: 'updates',  label: 'Updates',     desktop: '[data-test-id="bell-icon"] button[aria-label="Updates"]', mobile: null },
+    { id: 'messages', label: 'Messages',    desktop: '[data-test-id="notifications-button"]',              mobile: '[data-test-id="nav-bar-speech-ellipsis"]' },
+    { id: 'settings', label: 'Settings',    desktop: '[data-test-id="vertical-nav-settings-button"]',      mobile: null },
+  ];
+
+  // Buttons that exist on the current platform, in display order.
+  const VISIBLE_NAV_BUTTONS = NAV_BUTTONS.filter(b => (IS_MOBILE ? b.mobile : b.desktop));
+
+  let _customNavObs = null;
+  let _customNavRescan = null;
+
+  function navButtonSelector(btn) {
+    return IS_MOBILE ? btn.mobile : btn.desktop;
+  }
+
+  // Returns { url, size, circle } for a button id, merged over sane defaults.
+  function getNavImageCfg(id) {
+    const all = get('customNavImages') || {};
+    const raw = all[id] || {};
+    const size = Number(raw.size);
+    return {
+      url: normalizeImageUrl(raw.url),
+      size: Number.isFinite(size) ? Math.max(8, Math.round(size)) : 32,
+      circle: raw.circle !== false,
+    };
+  }
+
+  // Persists a single field for one button without disturbing the others.
+  function setNavImageField(id, field, value) {
+    const all = { ...(get('customNavImages') || {}) };
+    all[id] = { ...(all[id] || {}), [field]: value };
+    set('customNavImages', all);
+  }
+
+  function anyNavImageSet() {
+    return VISIBLE_NAV_BUTTONS.some(b => getNavImageCfg(b.id).url);
+  }
+
+  function removeCustomNavImages(root = document) {
+    root.querySelectorAll?.('.pe-custom-nav-img').forEach(img => img.remove());
+    // Restore any <svg> we hid inside a nav button frame.
+    NAV_BUTTONS.forEach(btn => {
+      const sel = navButtonSelector(btn);
+      if (!sel) return;
+      root.querySelectorAll?.(sel).forEach(el => {
+        el.querySelectorAll('svg').forEach(svg => {
+          if (svg.dataset.peNavHidden) {
+            svg.style.removeProperty('display');
+            delete svg.dataset.peNavHidden;
+          }
+        });
+      });
+    });
+  }
+
+  function applyCustomNavImages(root = document) {
+    VISIBLE_NAV_BUTTONS.forEach(btn => {
+      const sel = navButtonSelector(btn);
+      const { url, size, circle } = getNavImageCfg(btn.id);
+      const els = sel ? (root.querySelectorAll?.(sel) || []) : [];
+      els.forEach(el => {
+        // Icon frame: desktop uses .VHreRh, mobile uses .gSktR2; fall back.
+        const frame = el.querySelector('.VHreRh, .gSktR2') || el.querySelector('svg')?.parentElement || el;
+        const existing = frame.querySelector(':scope > .pe-custom-nav-img');
+        if (!url) {
+          if (existing) existing.remove();
+          frame.querySelectorAll('svg').forEach(svg => {
+            if (svg.dataset.peNavHidden) {
+              svg.style.removeProperty('display');
+              delete svg.dataset.peNavHidden;
+            }
+          });
+          return;
+        }
+        frame.style.setProperty('--pe-custom-nav-size', size + 'px');
+        frame.querySelectorAll('svg').forEach(svg => {
+          svg.style.setProperty('display', 'none', 'important');
+          svg.dataset.peNavHidden = '1';
+        });
+        let img = existing;
+        if (!img) {
+          img = document.createElement('img');
+          img.className = 'pe-custom-nav-img';
+          img.alt = btn.label;
+          frame.appendChild(img);
+        }
+        if (img.src !== url) img.src = url;
+        img.style.setProperty('--pe-custom-nav-size', size + 'px');
+        img.classList.toggle('pe-custom-nav-circle', circle);
+      });
+    });
+  }
+
+  function stopCustomNavImages() {
+    if (_customNavObs) { _customNavObs.disconnect(); _customNavObs = null; unregisterObserver('customNav'); }
+    removeCustomNavImages(document);
+  }
+
+  function initCustomNavImages() {
+    if (!anyNavImageSet()) {
+      stopCustomNavImages();
+      return;
+    }
+    applyCustomNavImages(document);
+    if (hasObserver('customNav')) return;
+    _customNavRescan = debounce(() => applyCustomNavImages(document), 250);
+    _customNavObs = new MutationObserver(records => {
+      if (hasOnlyPowerMenuMutations(records)) return;
+      _customNavRescan();
+    });
+    _customNavObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('customNav', _customNavObs, { target: document.documentElement });
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  MODULE: CUSTOM THEME / BACKGROUND
+  // ═══════════════════════════════════════════════════════════════════
+  // Injects a dedicated <style id="pe-theme"> that paints the page background
+  // (solid color, gradient or image) behind Pinterest's content. Presets just
+  // pre-fill the background fields; "Custom" lets the user set their own.
+
+  const THEME_PRESETS = [
+    { id: 'default', label: 'Pinterest default', value: '' },
+    { id: 'dark', label: 'Dark', value: '#121212' },
+    { id: 'midnight', label: 'Midnight', value: '#0f2027' },
+    { id: 'forest', label: 'Forest', value: '#1a2f1a' },
+    { id: 'rose', label: 'Rose', value: '#d64c7f' },
+    { id: 'custom', label: 'Custom color…' },
+  ];
+
+  function getAllThemePresets() {
+    return THEME_PRESETS;
+  }
+
+  function getThemeBgCss() {
+    if (!get('themeEnabled')) return '';
+    const c = String(get('themeColor') || '').trim();
+    return /^#([0-9a-f]{3}){1,2}$/i.test(c) ? `background-color:${c};` : '';
+  }
+
+  // Return a CSS `background` value suitable for the small theme preview swatch.
+  function getThemePreviewBackground() {
+    const id = get('themePreset');
+    const preset = THEME_PRESETS.find(p => p.id === id);
+    if (preset && preset.value) return preset.value;
+    return String(get('themeColor') || '').trim();
+  }
+
+  // Active only when the user has explicitly enabled the theme and supplied a color.
+  function themeIsActive() {
+    return !!getThemeBgCss();
+  }
+
+  // Migration from legacy gradient theme to solid-color model.
+  function migrateThemeSettings() {
+    const savedRaw = storageRead(SETTINGS_KEY);
+    const saved = savedRaw ? (() => { try { return JSON.parse(savedRaw); } catch (_) { return {}; } })() : {};
+    const validPresets = new Set(THEME_PRESETS.map(p => p.id));
+    const oldPreset = saved.themePreset;
+
+    // Convert a saved gradient into a solid color by grabbing its first color token.
+    if (Object.prototype.hasOwnProperty.call(saved, 'themeBgGradient')) {
+      const extracted = firstColorToken(saved.themeBgGradient);
+      if (extracted) set('themeColor', extracted);
+    }
+
+    // Existing installs without the new master switch: keep the theme enabled only
+    // if they had a non-default preset or a saved custom gradient. Fresh installs
+    // default to off.
+    if (saved.themeEnabled === undefined) {
+      const hadActiveTheme = (oldPreset && oldPreset !== 'default') ||
+        String(saved.themeBgGradient || '').trim();
+      if (!hadActiveTheme || (oldPreset && !validPresets.has(oldPreset))) {
+        set('themePreset', 'default');
+        set('themeEnabled', false);
+      } else {
+        set('themeEnabled', true);
+      }
+    }
+    if (oldPreset && !validPresets.has(oldPreset)) {
+      set('themePreset', 'default');
+      set('themeEnabled', false);
+    }
+
+    // Drop obsolete keys from storage.
+    ['themeBgType', 'themeBgColor', 'themeBgImageUrl', 'themeBgImageFit', 'savedThemes', 'themeBgGradient'].forEach(key => {
+      if (Object.prototype.hasOwnProperty.call(saved, key)) {
+        try { delete _cfg[key]; } catch (_) {}
+      }
+    });
+    saveCfg();
+  }
+
+  function ensureThemeStyleEl() {
+    let el = document.getElementById('pe-theme');
+    if (!el) {
+      el = document.createElement('style');
+      el.id = 'pe-theme';
+      (document.head || document.documentElement).appendChild(el);
+    }
+    return el;
+  }
+
+  function stopCustomTheme() {
+    const el = document.getElementById('pe-theme');
+    if (el) el.textContent = '';
+    stopThemeSurfaceObserver();
+    unmarkThemeSurfaces();
+  }
+
+  // ── Chrome "surfaces" (top header bar, sticky tags row, left nav rail) ──
+  // These ship their own opaque background from Pinterest's obfuscated, per-deploy
+  // class names, so the theme stops at them. We can't hard-code those classes, so
+  // we walk up from a stable hook to the element that actually carries the opaque
+  // background and tag it `pe-themed-surface`; the injected CSS then paints one
+  // uniform near-solid colour over all of them (derived from the theme) so the bars
+  // match each other and sit slightly off the page background. Runs on both desktop
+  // and mobile chrome.
+  let _peThemeSurfaceObs = null;
+
+  // Pick the first CSS colour token out of a gradient/string, or '' if none.
+  function firstColorToken(str) {
+    const m = String(str || '').match(/#[0-9a-f]{3,8}\b|\brgba?\([^)]+\)|\bhsla?\([^)]+\)/i);
+    return m ? m[0] : '';
+  }
+
+  // One uniform colour for every chrome bar, derived from the active theme and
+  // nudged toward the opposite of the current scheme so it reads as "similar but
+  // not equal" to the page background (the look the user liked on the sidebar).
+  function getChromeColor() {
+    const dark = isPinterestDarkTheme();
+    let base = String(get('themeColor') || '').trim();
+    if (!/^#([0-9a-f]{3}){1,2}$/i.test(base)) base = dark ? '#1c1c1c' : '#ededed';
+    return `color-mix(in srgb, ${base} 92%, ${dark ? '#fff' : '#000'} 8%)`;
+  }
+
+  function peBgIsOpaque(el) {
+    const bg = getComputedStyle(el).backgroundColor;
+    if (!bg) return false;
+    const m = bg.match(/rgba?\(([^)]+)\)/i);
+    if (!m) return false;
+    const parts = m[1].split(',');
+    const alpha = parts.length >= 4 ? parseFloat(parts[3]) : 1;
+    return alpha > 0.05;
+  }
+
+  // Nearest wide + short + opaque ancestor of `hook` (the chrome bar that carries
+  // the background) — capped in height so we grab the bar, not the whole app shell.
+  function peFindBarSurface(hook, maxUp) {
+    const minW = window.innerWidth * 0.5;
+    const maxH = window.innerHeight * 0.5;
+    let el = hook.parentElement;
+    for (let i = 0; el && i < maxUp; i++, el = el.parentElement) {
+      if (el === document.body || el.id === '__PWS_ROOT__') break;
+      if (el.offsetWidth >= minW && el.offsetHeight > 0 &&
+          el.offsetHeight <= maxH && peBgIsOpaque(el)) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  function markThemeSurfaces() {
+    if (!themeIsActive()) return;
+
+    // Top header bar — the full-width bar behind the search box. Pinterest gives
+    // it a stable `data-test-id="header-background"`, so paint that directly rather
+    // than walking up from the search input (which stops at the search pill, not
+    // the bar). Fall back to the heuristic walk if the test-id ever changes.
+    const headerBar = document.querySelector('[data-test-id="header-background"]');
+    if (headerBar) {
+      headerBar.classList.add('pe-themed-surface');
+    } else {
+      const search = document.querySelector('[data-test-id="search-box-input"]');
+      if (search) {
+        const bar = peFindBarSurface(search, 6);
+        if (bar) bar.classList.add('pe-themed-surface');
+      }
+    }
+
+    // Left vertical nav rail (stable id) + its opaque wrapper, if the bg is on a parent.
+    const rail = document.getElementById('VerticalNavContent');
+    if (rail) {
+      rail.classList.add('pe-themed-surface');
+      let p = rail.parentElement;
+      for (let i = 0; p && i < 3; i++, p = p.parentElement) {
+        if (p === document.body || p.id === '__PWS_ROOT__') break;
+        if (peBgIsOpaque(p)) { p.classList.add('pe-themed-surface'); break; }
+      }
+    }
+
+    // Secondary tags / filter row — a sticky/fixed, wide, opaque sub-header near the top.
+    document.querySelectorAll('[style*="sticky"], [style*="fixed"]').forEach(el => {
+      if (el.classList.contains('pe-themed-surface')) return;
+      const cs = getComputedStyle(el);
+      if (cs.position !== 'sticky' && cs.position !== 'fixed') return;
+      const r = el.getBoundingClientRect();
+      if (r.top <= 140 && r.width >= window.innerWidth * 0.5 &&
+          r.height > 0 && r.height <= window.innerHeight * 0.4 && peBgIsOpaque(el)) {
+        el.classList.add('pe-themed-surface');
+      }
+    });
+  }
+
+  function unmarkThemeSurfaces() {
+    document.querySelectorAll('.pe-themed-surface')
+      .forEach(el => el.classList.remove('pe-themed-surface'));
+  }
+
+  function ensureThemeSurfaceObserver() {
+    if (hasObserver('peThemeSurface')) return;
+    // Pinterest re-renders its chrome on SPA navigation, so re-tag after DOM changes.
+    const run = debounce(markThemeSurfaces, 300);
+    _peThemeSurfaceObs = new MutationObserver(run);
+    _peThemeSurfaceObs.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('peThemeSurface', _peThemeSurfaceObs, { target: document.documentElement });
+  }
+
+  function stopThemeSurfaceObserver() {
+    if (_peThemeSurfaceObs) {
+      _peThemeSurfaceObs.disconnect();
+      _peThemeSurfaceObs = null;
+      unregisterObserver('peThemeSurface');
+    }
+  }
+
+  function applyCustomTheme() {
+    if (!themeIsActive()) {
+      stopCustomTheme();
+      return;
+    }
+    const bg = getThemeBgCss();
+    const el = ensureThemeStyleEl();
+    // One uniform colour for the header / tags row / nav rail so they match each
+    // other and sit slightly off the page background.
+    const chrome = getChromeColor();
+    // Paint the roots, and make Pinterest's own opaque page surfaces
+    // transparent so the background shows through. Kept conservative to avoid
+    // washing out cards/menus (those keep their own backgrounds).
+    el.textContent = `
+      html, body { ${bg} }
+      body > #__PWS_ROOT__,
+      div[data-test-id="leftbar-content"],
+      .mainContainer,
+      [data-test-id="impression-container"] {
+        background: transparent !important;
+      }
+      .pe-themed-surface,
+      .KvKvqR {
+        background: ${chrome} !important;
+        background-image: none !important;
+      }
+    `;
+    markThemeSurfaces();
+    ensureThemeSurfaceObserver();
   }
 
 
@@ -5036,7 +6850,6 @@
     { key: 'contextMenu',     label: 'Image Context Menu',     desc: 'Right-click pins to copy, open or save the original',      reload: false },
     { key: 'reverseImageSearchButton', label: 'Reverse Image Search Button', desc: 'Show reverse search providers above closeup images', reload: false },
   ];
-  const VISIBLE_FEATURES = FEATURES;
 
   const DECLUTTER_FEATURES = [
     { key: 'declutterShopTheLook', label: 'Hide Shop The Look Modules', desc: 'Collapse Shop the Look shopping carousels and product modules', reload: false },
@@ -5073,13 +6886,7 @@
     { value: 'conservative', label: 'Conservative / fewer at once' },
   ];
 
-  const DARK_MODE_OPTIONS = [
-    { value: 'auto',  label: 'Auto (follow Pinterest)' },
-    { value: 'light', label: 'Light' },
-    { value: 'dark',  label: 'Dark' },
-  ];
-
-  const HIDE_FEATURES = [
+  const HIDE_NAV_ACTION_FEATURES = [
     { key: 'hideVisitSite',  label: 'Hide Visit Site',          desc: 'Remove all "Visit site" buttons',                         reload: false },
     { key: 'hideUpdates',    label: 'Hide Updates Bell',        desc: 'Hide the Updates / notifications button',                 reload: false },
     { key: 'hideMessages',   label: 'Hide Messages Button',     desc: 'Hide the Messages / notifications button in the nav',     reload: false },
@@ -5092,6 +6899,8 @@
     { key: 'hideViewLargerButton', label: 'Hide View Larger Button', desc: 'Hide the media viewer overlay button on images',     reload: false },
     { key: 'hideMoreOptionsButton', label: 'Hide More Options Button', desc: 'Hide the closeup More actions button',             reload: false },
     { key: 'hideReverseImageSearchButton', label: 'Hide Reverse Image Search Button', desc: 'Hide the custom reverse image search button', reload: false },
+  ];
+  const HIDE_COMMENT_FEATURES = [
     { key: 'hideCommentButton', label: 'Hide Comment Button',   desc: 'Hide only the Comments button in action rows',           reload: false },
     { key: 'hideComments',   label: 'Hide Comment Section',     desc: 'Hide comment sections and comment input on pins',        reload: false },
     { key: 'hideCommentEmojiButton', label: 'Hide Comment Emoji Button', desc: 'Hide the emoji picker in comment composer',      reload: false },
@@ -5099,7 +6908,10 @@
     { key: 'hideCommentPhotoButton', label: 'Hide Comment Photo Button', desc: 'Hide the photo picker in comment composer',      reload: false },
     { key: 'hideProactiveOutreach', label: 'Hide "See More Like This" Popup', desc: 'Hide the proactive outreach flyout that appears over pins', reload: false },
   ];
-  const VISIBLE_HIDE_FEATURES = IS_MOBILE ? HIDE_FEATURES.filter(f => f.key !== 'hideUploadImageButton') : HIDE_FEATURES;
+  const VISIBLE_HIDE_NAV_ACTION_FEATURES = IS_MOBILE
+    ? HIDE_NAV_ACTION_FEATURES.filter(f => f.key !== 'hideUploadImageButton')
+    : HIDE_NAV_ACTION_FEATURES;
+  const VISIBLE_HIDE_COMMENT_FEATURES = HIDE_COMMENT_FEATURES;
 
   // All-time statistics rows. Each is opt-in: the toggle both enables counting
   // and reveals the running total.
@@ -5127,23 +6939,76 @@
     ).join('');
   }
 
+  // <select> built from {id,label} option objects (theme presets, bg type, fit).
+  function renderIdSelect(key, options, current) {
+    return `<select class="pe-setting-select pe-theme-select" data-key="${key}">` +
+      options.map(o => `<option value="${escapeAttr(o.id)}" ${current === o.id ? 'selected' : ''}>${escapeAttr(o.label)}</option>`).join('') +
+      `</select>`;
+  }
+
+  // One url/size/circle block per platform-visible nav button.
+  function renderNavImageBlocks() {
+    return VISIBLE_NAV_BUTTONS.map(b => {
+      const cfg = getNavImageCfg(b.id);
+      return `
+        <div class="pe-navimg-block" data-nav-id="${b.id}">
+          <div class="pe-row pe-sub-row pe-input-row">
+            <div class="pe-info">
+              <span class="pe-name">${b.label} Image</span>
+              <span class="pe-desc">Paste an image link, or clear to restore</span>
+            </div>
+            <input class="pe-setting-input pe-navimg-url" data-nav-id="${b.id}" type="url" placeholder="https://example.com/icon.png" value="${escapeAttr(cfg.url)}">
+          </div>
+          <div class="pe-row pe-sub-row pe-input-row">
+            <div class="pe-info">
+              <span class="pe-name">${b.label} Size</span>
+              <span class="pe-desc">Pixel size for this icon</span>
+            </div>
+            <input class="pe-setting-input pe-setting-number pe-navimg-size" data-nav-id="${b.id}" type="number" min="8" step="1" value="${escapeAttr(cfg.size)}">
+          </div>
+          <div class="pe-row pe-sub-row">
+            <div class="pe-info">
+              <span class="pe-name">${b.label} Circle Crop</span>
+              <span class="pe-desc">Crop into a round icon</span>
+            </div>
+            <label class="pe-switch">
+              <input type="checkbox" class="pe-navimg-circle" data-nav-id="${b.id}" ${cfg.circle ? 'checked' : ''}>
+              <span class="pe-knob"></span>
+            </label>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  function renderThemeSection() {
+    return `
+      <div class="pe-row pe-sub-row pe-select-row">
+        <div class="pe-info">
+          <span class="pe-name">Preset</span>
+          <span class="pe-desc">Pick a color, or Pinterest default to restore the original look</span>
+        </div>
+        ${renderIdSelect('themePreset', getAllThemePresets(), get('themePreset'))}
+        <span id="pe-theme-preview" class="pe-theme-preview" aria-hidden="true"></span>
+      </div>
+      <div class="pe-row pe-sub-row pe-input-row pe-theme-row-color">
+        <div class="pe-info">
+          <span class="pe-name">Color</span>
+          <span class="pe-desc">Hex color code for the custom preset</span>
+        </div>
+        <input id="pe-theme-color-text" class="pe-setting-input" type="text" placeholder="#0f2027" value="${escapeAttr(get('themeColor'))}">
+        <input id="pe-theme-color-picker" type="color" value="${escapeAttr(get('themeColor'))}" aria-label="Pick custom theme color">
+      </div>`;
+  }
+
   function createSettingsPanel() {
     if (document.getElementById('pe-settings-wrap')) return;
+    migrateThemeSettings();
     const wrap = document.createElement('div');
     wrap.id = 'pe-settings-wrap';
     wrap.setAttribute('data-pe-ui', 'true');
-    const customizeGroupHtml = IS_MOBILE ? '' : `
-        <div class="pe-group">
-          <div class="pe-group-header" id="pe-group-customize-hdr">
-            <div class="pe-info">
-              <span class="pe-name">Customize</span>
-              <span class="pe-desc">Change the Pinterest logo image</span>
-            </div>
-            <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-              <path d="M7 10l5 5 5-5z"/>
-            </svg>
-          </div>
-          <div class="pe-group-body" id="pe-group-customize-body" style="display:none">
+    // Logo and per-button nav image rows are desktop-only; the background theme
+    // section works on both desktop and mobile.
+    const logoRowsHtml = IS_MOBILE ? '' : `
             <div class="pe-row pe-sub-row pe-input-row">
               <div class="pe-info">
                 <span class="pe-name">Pinterest Logo URL</span>
@@ -5167,75 +7032,245 @@
                 <input id="pe-custom-logo-circle" type="checkbox" data-key="customPinterestLogoCircle" data-reload="false" ${get('customPinterestLogoCircle') ? 'checked' : ''}>
                 <span class="pe-knob"></span>
               </label>
+            </div>`;
+    const buttonImagesSubsection = IS_MOBILE ? '' : `
+            <div class="pe-row pe-sub-row pe-subhead-row">
+              <div class="pe-info">
+                <span class="pe-name">Button Images</span>
+                <span class="pe-desc">Replace each nav button with your own image</span>
+              </div>
+              <button type="button" id="pe-navimg-chevron" class="pe-inline-chevron" aria-label="Show button image options" aria-expanded="false">
+                <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                  <path d="M7 10l5 5 5-5z"/>
+                </svg>
+              </button>
             </div>
-          </div>
-        </div>`;
-    wrap.innerHTML = `
-      <div id="pe-settings-panel" style="display:none">
-        <div id="pe-settings-title">Pinterest Power Menu <span id="pe-settings-by">By <a id="pe-settings-author" href="https://github.com/Angel2mp3" target="_blank" rel="noopener">Angel</a></span></div>
-        ${VISIBLE_FEATURES.map(f => `
-          <div class="pe-row">
+            <div id="pe-navimg-suboptions" style="display:none">
+              ${renderNavImageBlocks()}
+            </div>`;
+    const customizeGroupHtml = `
+        <div class="pe-group">
+          <div class="pe-group-header" id="pe-group-customize-hdr">
             <div class="pe-info">
-              <span class="pe-name">${f.label}</span>
-              <span class="pe-desc">${f.desc}</span>
+              <span class="pe-name">Customize</span>
+              <span class="pe-desc">Logo, button images &amp; background</span>
             </div>
-            <label class="pe-switch">
-              <input type="checkbox" data-key="${f.key}" data-reload="${f.reload}" ${get(f.key) ? 'checked' : ''}>
-              <span class="pe-knob"></span>
-            </label>
-          </div>`).join('')}
-        <div class="pe-row">
-          <div class="pe-info">
-            <span class="pe-name">Hide AI Content</span>
-            <span class="pe-desc">Hide likely AI-generated pins (heuristic)</span>
-          </div>
-          <button type="button" id="pe-ai-chevron" class="pe-inline-chevron" aria-label="Show AI content options" aria-expanded="false">
             <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
               <path d="M7 10l5 5 5-5z"/>
             </svg>
-          </button>
-          <label class="pe-switch">
-            <input type="checkbox" data-key="hideAiContent" data-reload="false" ${get('hideAiContent') ? 'checked' : ''}>
-            <span class="pe-knob"></span>
-          </label>
-        </div>
-        <div id="pe-ai-suboptions" style="display:none">
-          <div class="pe-row pe-sub-row pe-select-row">
-            <div class="pe-info">
-              <span class="pe-name">Aggressiveness</span>
-              <span class="pe-desc">Higher catches more, but more false positives</span>
-            </div>
-            <select class="pe-setting-select" data-key="aiContentAggressiveness">
-              ${renderOptions(AI_OPTIONS, get('aiContentAggressiveness'))}
-            </select>
           </div>
-          <div class="pe-row pe-sub-row pe-input-row">
-            <div class="pe-info">
-              <span class="pe-name">Custom AI Keywords</span>
-              <span class="pe-desc">Comma-separated extra AI terms to match</span>
+          <div class="pe-group-body" id="pe-group-customize-body" style="display:none">
+            ${logoRowsHtml}
+            ${buttonImagesSubsection}
+            <div class="pe-row pe-sub-row pe-subhead-row">
+              <div class="pe-info">
+                <span class="pe-name">Background Theme <span class="pe-beta-badge">Beta</span></span>
+                <span class="pe-desc">Custom site background color</span>
+              </div>
+              <button type="button" id="pe-theme-chevron" class="pe-inline-chevron" aria-label="Show theme options" aria-expanded="false">
+                <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                  <path d="M7 10l5 5 5-5z"/>
+                </svg>
+              </button>
             </div>
-            <input id="pe-ai-keywords-input" class="pe-setting-input" type="text" placeholder="e.g. niji, comfyui" value="${escapeAttr(get('aiContentKeywords'))}">
+            <div id="pe-theme-suboptions" style="display:none">
+              ${renderThemeSection()}
+            </div>
           </div>
+        </div>`;
+
+    // Helpers for the new grouped settings layout. Each row keeps the same
+    // data-key / data-reload / IDs as before so all existing wiring and saved
+    // settings continue to work.
+    const featureByKey = key => FEATURES.find(f => f.key === key);
+    const featureRow = f => `
+      <div class="pe-row pe-sub-row">
+        <div class="pe-info">
+          <span class="pe-name">${f.label}</span>
+          <span class="pe-desc">${f.desc}</span>
         </div>
-        <div class="pe-row">
+        <label class="pe-switch">
+          <input type="checkbox" data-key="${f.key}" data-reload="${f.reload}" ${get(f.key) ? 'checked' : ''}>
+          <span class="pe-knob"></span>
+        </label>
+      </div>`;
+
+    function buildGroup(id, title, desc, bodyHtml) {
+      return `
+        <div class="pe-group">
+          <div class="pe-group-header" id="pe-group-${id}-hdr">
+            <div class="pe-info">
+              <span class="pe-name">${title}</span>
+              <span class="pe-desc">${desc}</span>
+            </div>
+            <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+              <path d="M7 10l5 5 5-5z"/>
+            </svg>
+          </div>
+          <div class="pe-group-body" id="pe-group-${id}-body" style="display:none">
+            ${bodyHtml}
+          </div>
+        </div>`;
+    }
+
+    const essentialsBody = ['originalQuality','downloadFixer','declutter'].map(k => featureRow(featureByKey(k))).join('');
+    const mediaBody = ['gifHover','gifAutoPlay','videoAutoPlay','infiniteLoopVideo','removeVideos'].map(k => featureRow(featureByKey(k))).join('');
+    const toolsBody = (IS_MOBILE ? ['reverseImageSearchButton'] : ['contextMenu','reverseImageSearchButton'])
+      .map(k => featureRow(featureByKey(k))).join('');
+
+    const downloadsBody = `
+      <div class="pe-row pe-sub-row pe-select-row">
+        <div class="pe-info">
+          <span class="pe-name">Download Filename</span>
+          <span class="pe-desc">How saved pins are named (auto-falls back)</span>
+        </div>
+        <select class="pe-setting-select" data-key="filenameStrategy">
+          ${renderOptions(FILENAME_STRATEGY_OPTIONS, get('filenameStrategy'))}
+        </select>
+      </div>
+      <div class="pe-row pe-sub-row pe-select-row">
+        <div class="pe-info">
+          <span class="pe-name">Board Filename</span>
+          <span class="pe-desc">Naming for Board Downloader batches</span>
+        </div>
+        <select class="pe-setting-select" data-key="boardFilenameStrategy">
+          ${renderOptions(FILENAME_STRATEGY_OPTIONS, get('boardFilenameStrategy'))}
+        </select>
+      </div>
+      ${featureRow(featureByKey('boardDownloader'))}
+      <div class="pe-row pe-sub-row">
+        <div class="pe-info">
+          <span class="pe-name">Track Downloaded Pins</span>
+          <span class="pe-desc">Remember which pins were saved per board to enable "Download New"</span>
+        </div>
+        <label class="pe-switch">
+          <input type="checkbox" data-key="boardDownloadTrack" data-reload="false" ${get('boardDownloadTrack') ? 'checked' : ''}>
+          <span class="pe-knob"></span>
+        </label>
+      </div>
+      <div class="pe-row pe-sub-row">
+        <div class="pe-info">
+          <span class="pe-name">Convert WebP to PNG</span>
+          <span class="pe-desc">Re-encode WebP downloads to PNG before saving</span>
+        </div>
+        <label class="pe-switch">
+          <input type="checkbox" data-key="convertWebpToPng" data-reload="false" ${get('convertWebpToPng') ? 'checked' : ''}>
+          <span class="pe-knob"></span>
+        </label>
+      </div>`;
+
+    const contentFilteringBody = `
+      <div class="pe-row pe-sub-row">
+        <div class="pe-info">
+          <span class="pe-name">Hide AI Content</span>
+          <span class="pe-desc">Hide likely AI-generated pins (heuristic)</span>
+        </div>
+        <button type="button" id="pe-ai-chevron" class="pe-inline-chevron" aria-label="Show AI content options" aria-expanded="false">
+          <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+            <path d="M7 10l5 5 5-5z"/>
+          </svg>
+        </button>
+        <label class="pe-switch">
+          <input type="checkbox" data-key="hideAiContent" data-reload="false" ${get('hideAiContent') ? 'checked' : ''}>
+          <span class="pe-knob"></span>
+        </label>
+      </div>
+      <div id="pe-ai-suboptions" style="display:none">
+        <div class="pe-row pe-sub-row pe-select-row">
           <div class="pe-info">
-            <span class="pe-name">Hide by Keywords</span>
-            <span class="pe-desc">Hide any pin whose title/description contains your words</span>
+            <span class="pe-name">Aggressiveness</span>
+            <span class="pe-desc">Higher catches more, but more false positives</span>
           </div>
-          <label class="pe-switch">
-            <input type="checkbox" data-key="titleBlockEnabled" data-reload="false" ${get('titleBlockEnabled') ? 'checked' : ''}>
-            <span class="pe-knob"></span>
-          </label>
+          <select class="pe-setting-select" data-key="aiContentAggressiveness">
+            ${renderOptions(AI_OPTIONS, get('aiContentAggressiveness'))}
+          </select>
         </div>
-        <div id="pe-titleblock-suboptions" style="display:${get('titleBlockEnabled') ? 'block' : 'none'}">
-          <div class="pe-row pe-sub-row pe-input-row">
-            <div class="pe-info">
-              <span class="pe-name">Blocked Words</span>
-              <span class="pe-desc">Comma-separated; matched against the pin title</span>
-            </div>
-            <input id="pe-titleblock-keywords-input" class="pe-setting-input" type="text" placeholder="e.g. politics, spoiler" value="${escapeAttr(get('titleBlockKeywords'))}">
+        <div class="pe-row pe-sub-row pe-input-row">
+          <div class="pe-info">
+            <span class="pe-name">Custom AI Keywords</span>
+            <span class="pe-desc">Comma-separated extra AI terms to match</span>
           </div>
+          <input id="pe-ai-keywords-input" class="pe-setting-input" type="text" placeholder="e.g. niji, comfyui" value="${escapeAttr(get('aiContentKeywords'))}">
         </div>
+      </div>
+      <div class="pe-row pe-sub-row">
+        <div class="pe-info">
+          <span class="pe-name">Hide by Keywords</span>
+          <span class="pe-desc">Hide any pin whose title/description contains your words</span>
+        </div>
+        <label class="pe-switch">
+          <input type="checkbox" data-key="titleBlockEnabled" data-reload="false" ${get('titleBlockEnabled') ? 'checked' : ''}>
+          <span class="pe-knob"></span>
+        </label>
+      </div>
+      <div id="pe-titleblock-suboptions" style="display:${get('titleBlockEnabled') ? 'block' : 'none'}">
+        <div class="pe-row pe-sub-row pe-input-row">
+          <div class="pe-info">
+            <span class="pe-name">Blocked Words</span>
+            <span class="pe-desc">Comma-separated; matched against the pin title</span>
+          </div>
+          <input id="pe-titleblock-keywords-input" class="pe-setting-input" type="text" placeholder="e.g. politics, spoiler" value="${escapeAttr(get('titleBlockKeywords'))}">
+        </div>
+      </div>
+      <div class="pe-row pe-sub-row">
+        <div class="pe-info">
+          <span class="pe-name">Hide Comments by Keywords</span>
+          <span class="pe-desc">Collapse comments that contain your phrases</span>
+        </div>
+        <label class="pe-switch">
+          <input type="checkbox" data-key="commentBlockEnabled" data-reload="false" ${get('commentBlockEnabled') ? 'checked' : ''}>
+          <span class="pe-knob"></span>
+        </label>
+      </div>
+      <div id="pe-commentblock-suboptions" style="display:${get('commentBlockEnabled') ? 'block' : 'none'}">
+        <div class="pe-row pe-sub-row pe-input-row">
+          <div class="pe-info">
+            <span class="pe-name">Blocked Phrases</span>
+            <span class="pe-desc">Comma-separated; matched against original and translated comment text</span>
+          </div>
+          <input id="pe-commentblock-keywords-input" class="pe-setting-input" type="text" placeholder="e.g. spam, scam link, follow me" value="${escapeAttr(get('commentBlockKeywords'))}">
+        </div>
+      </div>
+      <div class="pe-row pe-sub-row">
+        <div class="pe-info">
+          <span class="pe-name">Hide Pins by ID</span>
+          <span class="pe-desc">Enable the "Hide / Don't show again" actions on pins</span>
+        </div>
+        <label class="pe-switch">
+          <input type="checkbox" data-key="hideByPinIdEnabled" data-reload="false" ${get('hideByPinIdEnabled') ? 'checked' : ''}>
+          <span class="pe-knob"></span>
+        </label>
+      </div>
+      <div class="pe-row pe-sub-row">
+        <div class="pe-info">
+          <span class="pe-name">Hide Already-Seen Pins</span>
+          <span class="pe-desc">Collapse pins you have already opened</span>
+        </div>
+        <label class="pe-switch">
+          <input type="checkbox" data-key="hideSeenPins" data-reload="false" ${get('hideSeenPins') ? 'checked' : ''}>
+          <span class="pe-knob"></span>
+        </label>
+      </div>
+      <div id="pe-hidepinid-suboptions" style="display:${get('hideByPinIdEnabled') ? 'block' : 'none'}">
+        <div class="pe-row pe-sub-row">
+          <div class="pe-info">
+            <span class="pe-name">Hidden Pin IDs</span>
+            <span class="pe-desc">Edit or clear the list of hidden pin IDs</span>
+          </div>
+          <button type="button" id="pe-hidepinid-clear" class="pe-stats-reset-btn">Clear</button>
+        </div>
+        <div class="pe-row pe-sub-row">
+          <textarea id="pe-hidepinid-textarea" class="pe-setting-input pe-hidepinid-textarea" rows="4" placeholder="comma-separated pin IDs">${escapeAttr([...getHiddenPinIds()].join(', '))}</textarea>
+        </div>
+      </div>`;
+    wrap.innerHTML = `
+      <div id="pe-settings-panel" style="display:none">
+        <div id="pe-settings-title">Pinterest Power Menu <span id="pe-settings-by">By <a id="pe-settings-author" href="https://github.com/Angel2mp3" target="_blank" rel="noopener">Angel</a></span></div>
+        ${buildGroup('essentials', 'Essentials', 'Core power features', essentialsBody)}
+        ${buildGroup('media', 'Media Playback', 'GIF and video behavior', mediaBody)}
+        ${buildGroup('downloads', 'Downloads', 'Filename and download options', downloadsBody)}
+        ${buildGroup('content-filtering', 'Content Filtering', 'AI and keyword filters', contentFilteringBody)}
+        ${buildGroup('tools', 'Tools', 'Extra utilities', toolsBody)}
         <div class="pe-group">
           <div class="pe-group-header" id="pe-group-declutter-hdr">
             <div class="pe-info">
@@ -5323,27 +7358,55 @@
             </svg>
           </div>
           <div class="pe-group-body" id="pe-group-hide-body" style="display:none">
-            ${VISIBLE_HIDE_FEATURES.map(f => `
-              <div class="pe-row pe-sub-row">
-                <div class="pe-info">
-                  <span class="pe-name">${f.label}</span>
-                  <span class="pe-desc">${f.desc}</span>
-                </div>
-                <label class="pe-switch">
-                  <input type="checkbox" data-key="${f.key}" data-reload="${f.reload}" ${get(f.key) ? 'checked' : ''}>
-                  <span class="pe-knob"></span>
-                </label>
-              </div>`).join('')}
+            <div class="pe-row pe-sub-row pe-subhead-row">
+              <div class="pe-info">
+                <span class="pe-name">Navigation &amp; Actions</span>
+                <span class="pe-desc">Nav buttons and pin action bar items</span>
+              </div>
+              <button type="button" id="pe-hide-nav-actions-chevron" class="pe-inline-chevron" aria-label="Show navigation and action options" aria-expanded="false">
+                <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                  <path d="M7 10l5 5 5-5z"/>
+                </svg>
+              </button>
+            </div>
+            <div id="pe-hide-nav-actions-suboptions" style="display:none">
+              ${VISIBLE_HIDE_NAV_ACTION_FEATURES.map(f => `
+                <div class="pe-row pe-sub-row">
+                  <div class="pe-info">
+                    <span class="pe-name">${f.label}</span>
+                    <span class="pe-desc">${f.desc}</span>
+                  </div>
+                  <label class="pe-switch">
+                    <input type="checkbox" data-key="${f.key}" data-reload="${f.reload}" ${get(f.key) ? 'checked' : ''}>
+                    <span class="pe-knob"></span>
+                  </label>
+                </div>`).join('')}
+            </div>
+            <div class="pe-row pe-sub-row pe-subhead-row">
+              <div class="pe-info">
+                <span class="pe-name">Comments &amp; More</span>
+                <span class="pe-desc">Comment section and composer controls</span>
+              </div>
+              <button type="button" id="pe-hide-comments-chevron" class="pe-inline-chevron" aria-label="Show comment options" aria-expanded="false">
+                <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                  <path d="M7 10l5 5 5-5z"/>
+                </svg>
+              </button>
+            </div>
+            <div id="pe-hide-comments-suboptions" style="display:none">
+              ${VISIBLE_HIDE_COMMENT_FEATURES.map(f => `
+                <div class="pe-row pe-sub-row">
+                  <div class="pe-info">
+                    <span class="pe-name">${f.label}</span>
+                    <span class="pe-desc">${f.desc}</span>
+                  </div>
+                  <label class="pe-switch">
+                    <input type="checkbox" data-key="${f.key}" data-reload="${f.reload}" ${get(f.key) ? 'checked' : ''}>
+                    <span class="pe-knob"></span>
+                  </label>
+                </div>`).join('')}
+            </div>
           </div>
-        </div>
-        <div class="pe-row pe-select-row">
-          <div class="pe-info">
-            <span class="pe-name">Dark Mode</span>
-            <span class="pe-desc">Appearance of the settings panel and FAB</span>
-          </div>
-          <select class="pe-setting-select" data-key="darkMode">
-            ${renderOptions(DARK_MODE_OPTIONS, get('darkMode'))}
-          </select>
         </div>
         <div class="pe-group">
           <div class="pe-group-header" id="pe-group-stats-hdr">
@@ -5362,7 +7425,7 @@
                   <span class="pe-name">${s.label}</span>
                   <span class="pe-desc">${s.desc}</span>
                 </div>
-                <span class="pe-stat-value" id="pe-stat-val-${s.count}" style="display:${get(s.show) ? 'inline-block' : 'none'}">${Number(get(s.count)) || 0}</span>
+                <span class="pe-stat-value" id="pe-stat-val-${s.count}" title="${(Number(get(s.count)) || 0).toLocaleString()}" style="display:${get(s.show) ? 'inline-block' : 'none'}">${formatStatCount(get(s.count))}</span>
                 <label class="pe-switch">
                   <input type="checkbox" data-key="${s.show}" data-reload="false" ${get(s.show) ? 'checked' : ''}>
                   <span class="pe-knob"></span>
@@ -5374,6 +7437,67 @@
                 <span class="pe-desc">Clear all counters back to zero</span>
               </div>
               <button type="button" id="pe-stats-reset" class="pe-stats-reset-btn">Reset</button>
+            </div>
+          </div>
+        </div>
+        <div class="pe-group">
+          <div class="pe-group-header" id="pe-group-debug-hdr">
+            <div class="pe-info">
+              <span class="pe-name">Debugging</span>
+              <span class="pe-desc">Developer options</span>
+            </div>
+            <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+              <path d="M7 10l5 5 5-5z"/>
+            </svg>
+          </div>
+          <div class="pe-group-body" id="pe-group-debug-body" style="display:none">
+            <div class="pe-row pe-sub-row">
+              <div class="pe-info">
+                <span class="pe-name">Debug Logging</span>
+                <span class="pe-desc">Print diagnostic messages to the browser console</span>
+              </div>
+              <label class="pe-switch">
+                <input type="checkbox" data-key="debugLogging" data-reload="false" ${get('debugLogging') ? 'checked' : ''}>
+                <span class="pe-knob"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="pe-group">
+          <div class="pe-group-header" id="pe-group-backup-hdr">
+            <div class="pe-info">
+              <span class="pe-name">Backup &amp; Restore</span>
+              <span class="pe-desc">Save or load settings, hidden pins, and board history</span>
+            </div>
+            <svg class="pe-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+              <path d="M7 10l5 5 5-5z"/>
+            </svg>
+          </div>
+          <div class="pe-group-body" id="pe-group-backup-body" style="display:none">
+            <div class="pe-row pe-sub-row">
+              <div class="pe-info">
+                <span class="pe-name">Export Backup</span>
+                <span class="pe-desc">Download a JSON file with all your data</span>
+              </div>
+              <button type="button" id="pe-export-btn" class="pe-stats-reset-btn">Export</button>
+            </div>
+            <div class="pe-row pe-sub-row">
+              <div class="pe-info">
+                <span class="pe-name">Import Backup</span>
+                <span class="pe-desc">Restore from a previously exported JSON file</span>
+              </div>
+              <button type="button" id="pe-import-btn" class="pe-stats-reset-btn">Import</button>
+              <input type="file" id="pe-import-file" accept="application/json" style="display:none">
+            </div>
+            <div class="pe-row pe-sub-row">
+              <div class="pe-info">
+                <span class="pe-name">Copy to Clipboard</span>
+                <span class="pe-desc">Copy backup JSON for manual saving on iOS</span>
+              </div>
+              <button type="button" id="pe-copy-backup-btn" class="pe-stats-reset-btn">Copy</button>
+            </div>
+            <div id="pe-backup-status" class="pe-row pe-sub-row" style="display:none">
+              <span class="pe-desc" id="pe-backup-status-text"></span>
             </div>
           </div>
         </div>
@@ -5398,11 +7522,55 @@
       e.stopPropagation();
     }
 
-    function togglePanel() {
-      panelOpen = !panelOpen;
-      panel.style.display = panelOpen ? 'block' : 'none';
-      btn.classList.toggle('pe-settings-open', panelOpen);
+    // Collapse every manually-expanded group/sub-panel so the menu is clean on
+    // reopen. (Feature-tied panels like #pe-titleblock-suboptions follow their
+    // own toggle and are left alone.)
+    function resetPanelCollapsibles() {
+      wrap.querySelectorAll('.pe-group-body').forEach(b => { b.style.display = 'none'; });
+      wrap.querySelectorAll('.pe-group-header.pe-group-open').forEach(h => h.classList.remove('pe-group-open'));
+      ['#pe-ai-suboptions', '#pe-navimg-suboptions', '#pe-theme-suboptions', '#pe-hide-nav-actions-suboptions', '#pe-hide-comments-suboptions'].forEach(sel => {
+        const el = wrap.querySelector(sel);
+        if (el) el.style.display = 'none';
+      });
+      wrap.querySelectorAll('.pe-inline-chevron-open').forEach(c => {
+        c.classList.remove('pe-inline-chevron-open');
+        c.setAttribute('aria-expanded', 'false');
+      });
     }
+
+    function closePanel() {
+      panelOpen = false;
+      panel.style.display = 'none';
+      btn.classList.remove('pe-settings-open');
+      resetPanelCollapsibles();
+    }
+
+    function togglePanel() {
+      if (panelOpen) { closePanel(); return; }
+      panelOpen = true;
+      panel.style.display = 'block';
+      btn.classList.add('pe-settings-open');
+    }
+
+    // Whole-row click toggles an inline-chevron sub-panel (like the parent groups),
+    // while still letting the row's own controls (switch, inputs) work normally.
+    function wireRowExpander(chevSel, bodySel) {
+      const chev = wrap.querySelector(chevSel);
+      const body = wrap.querySelector(bodySel);
+      if (!chev || !body) return;
+      const row = chev.closest('.pe-row') || chev.parentElement;
+      if (!row) return;
+      row.classList.add('pe-row-clickable');
+      row.addEventListener('click', e => {
+        if (e.target.closest('.pe-switch, input, select, a')) return;
+        e.stopPropagation();
+        const open = body.style.display !== 'none';
+        body.style.display = open ? 'none' : 'block';
+        chev.classList.toggle('pe-inline-chevron-open', !open);
+        chev.setAttribute('aria-expanded', String(!open));
+      });
+    }
+
     panel.addEventListener('wheel', stopSettingsPanelEventBubble, { passive: true });
     panel.addEventListener('touchmove', stopSettingsPanelEventBubble, { passive: true });
     wrap.addEventListener('click', stopSettingsPanelEventBubble);
@@ -5410,73 +7578,148 @@
     wrap.addEventListener('touchstart', stopSettingsPanelEventBubble, { passive: true });
     btn.addEventListener('click', e => { e.stopPropagation(); togglePanel(); });
     document.addEventListener('click', e => {
-      if (panelOpen && !wrap.contains(e.target)) { panelOpen = false; panel.style.display = 'none'; btn.classList.remove('pe-settings-open'); }
+      if (panelOpen && !wrap.contains(e.target)) closePanel();
     });
 
     // Collapsible settings groups
-    const declutterHdr  = wrap.querySelector('#pe-group-declutter-hdr');
-    const declutterBody = wrap.querySelector('#pe-group-declutter-body');
-    declutterHdr.addEventListener('click', () => {
-      const open = declutterBody.style.display !== 'none';
-      declutterBody.style.display = open ? 'none' : 'block';
-      declutterHdr.classList.toggle('pe-group-open', !open);
-    });
-
-    const translateHdr  = wrap.querySelector('#pe-group-translate-hdr');
-    const translateBody = wrap.querySelector('#pe-group-translate-body');
-    translateHdr.addEventListener('click', () => {
-      const open = translateBody.style.display !== 'none';
-      translateBody.style.display = open ? 'none' : 'block';
-      translateHdr.classList.toggle('pe-group-open', !open);
-    });
-
-    const customizeHdr  = wrap.querySelector('#pe-group-customize-hdr');
-    const customizeBody = wrap.querySelector('#pe-group-customize-body');
-    if (customizeHdr && customizeBody) {
-      customizeHdr.addEventListener('click', () => {
-        const open = customizeBody.style.display !== 'none';
-        customizeBody.style.display = open ? 'none' : 'block';
-        customizeHdr.classList.toggle('pe-group-open', !open);
+    function wireGroup(hdrSel, bodySel) {
+      const hdr = wrap.querySelector(hdrSel);
+      const body = wrap.querySelector(bodySel);
+      if (!hdr || !body) return;
+      hdr.addEventListener('click', () => {
+        const open = body.style.display !== 'none';
+        body.style.display = open ? 'none' : 'block';
+        hdr.classList.toggle('pe-group-open', !open);
       });
     }
 
-    const hideHdr  = wrap.querySelector('#pe-group-hide-hdr');
-    const hideBody = wrap.querySelector('#pe-group-hide-body');
-    hideHdr.addEventListener('click', () => {
-      const open = hideBody.style.display !== 'none';
-      hideBody.style.display = open ? 'none' : 'block';
-      hideHdr.classList.toggle('pe-group-open', !open);
-    });
+    [
+      ['#pe-group-essentials-hdr', '#pe-group-essentials-body'],
+      ['#pe-group-media-hdr', '#pe-group-media-body'],
+      ['#pe-group-downloads-hdr', '#pe-group-downloads-body'],
+      ['#pe-group-content-filtering-hdr', '#pe-group-content-filtering-body'],
+      ['#pe-group-tools-hdr', '#pe-group-tools-body'],
+      ['#pe-group-declutter-hdr', '#pe-group-declutter-body'],
+      ['#pe-group-translate-hdr', '#pe-group-translate-body'],
+      ['#pe-group-customize-hdr', '#pe-group-customize-body'],
+      ['#pe-group-hide-hdr', '#pe-group-hide-body'],
+      ['#pe-group-stats-hdr', '#pe-group-stats-body'],
+      ['#pe-group-debug-hdr', '#pe-group-debug-body'],
+      ['#pe-group-backup-hdr', '#pe-group-backup-body'],
+    ].forEach(([h, b]) => wireGroup(h, b));
 
-    // Inline chevron that collapses/expands the Hide AI Content sub-options
-    // independently of the toggle (so they don't permanently take up space).
-    const aiChevron = wrap.querySelector('#pe-ai-chevron');
-    const aiBody    = wrap.querySelector('#pe-ai-suboptions');
-    if (aiChevron && aiBody) {
-      aiChevron.addEventListener('click', e => {
-        e.stopPropagation();
-        const open = aiBody.style.display !== 'none';
-        aiBody.style.display = open ? 'none' : 'block';
-        aiChevron.classList.toggle('pe-inline-chevron-open', !open);
-        aiChevron.setAttribute('aria-expanded', String(!open));
-      });
-    }
-
-    const statsHdr  = wrap.querySelector('#pe-group-stats-hdr');
-    const statsBody = wrap.querySelector('#pe-group-stats-body');
-    if (statsHdr && statsBody) {
-      statsHdr.addEventListener('click', () => {
-        const open = statsBody.style.display !== 'none';
-        statsBody.style.display = open ? 'none' : 'block';
-        statsHdr.classList.toggle('pe-group-open', !open);
-      });
-    }
+    // Inline-chevron sub-panels: the whole row toggles them (Hide AI Content,
+    // Button Images, Background Theme), matching the parent group behaviour.
+    wireRowExpander('#pe-ai-chevron', '#pe-ai-suboptions');
 
     const statsReset = wrap.querySelector('#pe-stats-reset');
     if (statsReset) {
+      let resetArmed = false;
+      let resetTimer = null;
+      const disarm = () => {
+        resetArmed = false;
+        clearTimeout(resetTimer);
+        statsReset.textContent = 'Reset';
+        statsReset.classList.remove('pe-confirm');
+      };
       statsReset.addEventListener('click', e => {
         e.stopPropagation();
+        if (!resetArmed) {
+          // First click arms a confirmation; reverts after a few seconds.
+          resetArmed = true;
+          statsReset.textContent = 'Confirm?';
+          statsReset.classList.add('pe-confirm');
+          clearTimeout(resetTimer);
+          resetTimer = setTimeout(disarm, 4000);
+          return;
+        }
         STAT_ITEMS.forEach(s => { set(s.count, 0); updateStatDisplay(s.count); });
+        disarm();
+      });
+    }
+
+    // Backup & restore handlers
+    const exportBtn = wrap.querySelector('#pe-export-btn');
+    const importBtn = wrap.querySelector('#pe-import-btn');
+    const importFile = wrap.querySelector('#pe-import-file');
+    const copyBackupBtn = wrap.querySelector('#pe-copy-backup-btn');
+    const backupStatus = wrap.querySelector('#pe-backup-status');
+    const backupStatusText = wrap.querySelector('#pe-backup-status-text');
+
+    function showBackupStatus(msg, isError = false) {
+      if (!backupStatus || !backupStatusText) return;
+      backupStatusText.textContent = msg;
+      backupStatusText.style.color = isError ? '#e60023' : '';
+      backupStatus.style.display = 'flex';
+      setTimeout(() => { backupStatus.style.display = 'none'; }, 5000);
+    }
+
+    if (exportBtn) {
+      exportBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        const data = exportPowerMenuData();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `pinterest-power-menu-backup-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        showBackupStatus('Backup downloaded');
+      });
+    }
+
+    if (importBtn && importFile) {
+      importBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        importFile.click();
+      });
+      importFile.addEventListener('change', e => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const merge = !!e.shiftKey;
+          const result = importPowerMenuData(String(reader.result), { merge });
+          if (result.success) {
+            showBackupStatus('Backup restored' + (merge ? ' (merged)' : ''));
+            // Refresh UI to reflect imported settings
+            const panel = wrap.querySelector('#pe-settings-panel');
+            if (panel) {
+              const wasOpen = panel.style.display !== 'none';
+              panel.remove();
+              ensureSettingsPanel();
+              if (wasOpen) {
+                const newPanel = document.getElementById('pe-settings-panel');
+                if (newPanel) newPanel.style.display = 'block';
+              }
+            }
+            applyVisitSiteToggle();
+            applyNavToggles();
+            applyDeclutterToggle();
+            applyCustomTheme();
+          } else {
+            showBackupStatus(result.error || 'Import failed', true);
+          }
+        };
+        reader.onerror = () => showBackupStatus('Failed to read file', true);
+        reader.readAsText(file);
+        importFile.value = '';
+      });
+    }
+
+    if (copyBackupBtn) {
+      copyBackupBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        const data = exportPowerMenuData();
+        const json = JSON.stringify(data);
+        navigator.clipboard.writeText(json).then(() => {
+          showBackupStatus('Backup copied to clipboard');
+        }).catch(() => {
+          showBackupStatus('Failed to copy', true);
+        });
       });
     }
 
@@ -5484,7 +7727,11 @@
     wrap.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       cb.addEventListener('change', () => {
         const key = cb.dataset.key;
+        // Per-button "circle crop" checkboxes carry no data-key (they live in
+        // the nested customNavImages object) and are wired separately below.
+        if (!key) return;
         set(key, cb.checked);
+        document.dispatchEvent(new CustomEvent('pe-setting-change', { detail: { key, value: cb.checked } }));
         if (key === 'hideVisitSite') applyVisitSiteToggle();
         if (key === 'gifHover') { pauseActiveGif(); document.querySelectorAll('video').forEach(pauseVidOnAdd); }
         if (key === 'gifAutoPlay') { if (cb.checked) initGifAutoPlay(); else stopGifAutoPlay(); }
@@ -5496,7 +7743,7 @@
           applyInfiniteLoopVideoToggle();
           if (cb.checked) initInfiniteLoopVideo(); else stopInfiniteLoopVideo();
         }
-        if (key === 'declutter') { applyDeclutterToggle(); if (cb.checked) { hideShopTheLookModules(document); hideDeclutterMobileInlineVisitButtons(document); initDeclutter(); if (get('hideShopPosts')) initHideShopPosts(); } else stopHideShopPosts({ restore: true }); }
+        if (key === 'declutter') { applyDeclutterToggle(); if (cb.checked) { hideShopTheLookModules(document); initDeclutter(); if (get('hideShopPosts')) initHideShopPosts(); } else stopHideShopPosts({ restore: true }); }
         if (key === 'declutterShopTheLook') { applyDeclutterToggle(); if (get('declutter')) hideShopTheLookModules(document); }
         if (key === 'declutterSearchAdvisory') applyDeclutterToggle();
         if (key === 'removeVideos') { if (cb.checked) initRemoveVideos(); }
@@ -5507,13 +7754,19 @@
         }
         // AI sub-options visibility is controlled by the #pe-ai-chevron, not the toggle.
         if (key === 'hideAiContent') refreshContentFilter();
+        if (key === 'hideByPinIdEnabled') {
+          const body = wrap.querySelector('#pe-hidepinid-suboptions');
+          if (body) body.style.display = cb.checked ? 'block' : 'none';
+          refreshContentFilter();
+        }
+        if (key === 'hideSeenPins') refreshContentFilter();
         if (key.startsWith('statShow')) {
           const item = STAT_ITEMS.find(s => s.show === key);
           if (item) {
             const valEl = wrap.querySelector('#pe-stat-val-' + item.count);
             if (valEl) {
               valEl.style.display = cb.checked ? 'inline-block' : 'none';
-              if (cb.checked) valEl.textContent = String(Number(get(item.count)) || 0);
+              if (cb.checked) updateStatDisplay(item.count);
             }
           }
         }
@@ -5529,6 +7782,11 @@
         if (key === 'hideMessages' && cb.checked) initMessagesRemover();
         if (key === 'hideShopPosts') { if (cb.checked && get('declutter')) initHideShopPosts(); else stopHideShopPosts({ restore: true }); }
         if (key === 'hideComments') { applyNavToggles(); if (cb.checked) initHideComments(); }
+        if (key === 'commentBlockEnabled') {
+          const body = wrap.querySelector('#pe-commentblock-suboptions');
+          if (body) body.style.display = cb.checked ? 'block' : 'none';
+          refreshCommentBlocker();
+        }
         if (TRANSLATE_FEATURES.some(f => f.key === key)) refreshTranslationFeatures();
         if (key === 'reverseImageSearchButton') { if (cb.checked) initReverseImageSearchButton(); else { removeReverseImageSearchButton(); scheduleMobileCloseupActionButtonsRefresh(); } }
         if (key === 'hideReverseImageSearchButton') { if (cb.checked) removeReverseImageSearchButton(); else if (get('reverseImageSearchButton')) initReverseImageSearchButton(); scheduleMobileCloseupActionButtonsRefresh(); }
@@ -5542,11 +7800,93 @@
       sel.addEventListener('change', () => {
         const k = sel.dataset.key;
         set(k, sel.value);
-        if (k === 'darkMode') applyDarkMode();
-        else if (k === 'aiContentAggressiveness') refreshContentFilter();
-        else refreshTranslationFeatures();
+        if (k === 'aiContentAggressiveness') refreshContentFilter();
+        else if (sel.classList.contains('pe-theme-select')) handleThemeSelectChange(k, wrap);
+        else if (k === 'autoTranslateTarget' || k === 'titleTranslationDisplay' || k === 'autoTranslateCommentMode') refreshTranslationFeatures();
       });
     });
+
+    // Sync the color inputs + preview to the current config.
+    function syncThemeInputs() {
+      const colorText = wrap.querySelector('#pe-theme-color-text');
+      const colorPicker = wrap.querySelector('#pe-theme-color-picker');
+      const color = get('themeColor') || '';
+      if (colorText) colorText.value = color;
+      if (colorPicker) colorPicker.value = color;
+      const preview = wrap.querySelector('#pe-theme-preview');
+      if (preview) preview.style.background = getThemePreviewBackground();
+    }
+
+    function handleThemeSelectChange(key) {
+      if (key === 'themePreset') {
+        const id = get('themePreset');
+        const preset = THEME_PRESETS.find(p => p.id === id);
+        const enabled = id !== 'default';
+        set('themeEnabled', enabled);
+        if (preset && preset.value) {
+          set('themeColor', preset.value);
+        }
+        syncThemeInputs();
+        applyCustomTheme();
+      }
+    }
+
+    // Color inputs (text + native picker stay in sync)
+    const colorText = wrap.querySelector('#pe-theme-color-text');
+    const colorPicker = wrap.querySelector('#pe-theme-color-picker');
+    if (colorText) {
+      const save = debounce(() => {
+        const val = colorText.value.trim();
+        if (/^#([0-9a-f]{3}){1,2}$/i.test(val)) {
+          set('themeColor', val);
+          if (colorPicker) colorPicker.value = val;
+          applyCustomTheme();
+        }
+      }, 300);
+      colorText.addEventListener('input', save);
+      colorText.addEventListener('change', () => {
+        const val = colorText.value.trim();
+        if (/^#([0-9a-f]{3}){1,2}$/i.test(val)) {
+          set('themeColor', val);
+          if (colorPicker) colorPicker.value = val;
+          applyCustomTheme();
+        }
+      });
+    }
+    if (colorPicker) {
+      colorPicker.addEventListener('input', () => {
+        const val = colorPicker.value;
+        set('themeColor', val);
+        if (colorText) colorText.value = val;
+        applyCustomTheme();
+      });
+    }
+
+    // Per-button image inputs (url + size) and circle-crop checkboxes.
+    wrap.querySelectorAll('.pe-navimg-url').forEach(el => {
+      const id = el.dataset.navId;
+      const save = debounce(() => { setNavImageField(id, 'url', el.value.trim()); initCustomNavImages(); }, 300);
+      el.addEventListener('input', save);
+      el.addEventListener('change', () => { setNavImageField(id, 'url', el.value.trim()); initCustomNavImages(); });
+    });
+    wrap.querySelectorAll('.pe-navimg-size').forEach(el => {
+      const id = el.dataset.navId;
+      const readSize = () => { const n = Number(el.value); return Number.isFinite(n) ? Math.max(8, Math.round(n)) : 32; };
+      const save = debounce(() => { setNavImageField(id, 'size', readSize()); initCustomNavImages(); }, 150);
+      el.addEventListener('input', save);
+      el.addEventListener('change', () => { setNavImageField(id, 'size', readSize()); initCustomNavImages(); });
+    });
+    wrap.querySelectorAll('.pe-navimg-circle').forEach(el => {
+      const id = el.dataset.navId;
+      el.addEventListener('change', () => { setNavImageField(id, 'circle', el.checked); initCustomNavImages(); });
+    });
+
+    // Inline chevrons for the Button Images + Background Theme subsections —
+    // whole-row click, same as the AI row.
+    wireRowExpander('#pe-navimg-chevron', '#pe-navimg-suboptions');
+    wireRowExpander('#pe-theme-chevron', '#pe-theme-suboptions');
+    wireRowExpander('#pe-hide-nav-actions-chevron', '#pe-hide-nav-actions-suboptions');
+    wireRowExpander('#pe-hide-comments-chevron', '#pe-hide-comments-suboptions');
 
     const aiKeywordsInput = wrap.querySelector('#pe-ai-keywords-input');
     if (aiKeywordsInput) {
@@ -5572,6 +7912,62 @@
         set('titleBlockKeywords', titleBlockInput.value);
         refreshContentFilter();
       });
+    }
+
+    const commentBlockInput = wrap.querySelector('#pe-commentblock-keywords-input');
+    if (commentBlockInput) {
+      const saveCommentBlock = debounce(() => {
+        set('commentBlockKeywords', commentBlockInput.value);
+        refreshCommentBlocker();
+      }, 350);
+      commentBlockInput.addEventListener('input', saveCommentBlock);
+      commentBlockInput.addEventListener('change', () => {
+        set('commentBlockKeywords', commentBlockInput.value);
+        refreshCommentBlocker();
+      });
+    }
+
+    const hiddenPinTextarea = wrap.querySelector('#pe-hidepinid-textarea');
+    const hiddenPinClearBtn = wrap.querySelector('#pe-hidepinid-clear');
+    if (hiddenPinTextarea) {
+      const parseIds = val => [...val.matchAll(/\d+/g)].map(m => m[0]).filter(Boolean);
+      const saveHiddenPinIdsFromText = debounce(() => {
+        const ids = parseIds(hiddenPinTextarea.value);
+        saveHiddenPinIds(new Set(ids));
+        refreshContentFilter();
+      }, 350);
+      hiddenPinTextarea.addEventListener('input', saveHiddenPinIdsFromText);
+      hiddenPinTextarea.addEventListener('change', () => {
+        const ids = parseIds(hiddenPinTextarea.value);
+        saveHiddenPinIds(new Set(ids));
+        hiddenPinTextarea.value = ids.join(', ');
+        refreshContentFilter();
+      });
+      if (hiddenPinClearBtn) {
+        let clearArmed = false;
+        let clearTimer = null;
+        const disarmClear = () => {
+          clearArmed = false;
+          clearTimeout(clearTimer);
+          hiddenPinClearBtn.textContent = 'Clear';
+          hiddenPinClearBtn.classList.remove('pe-confirm');
+        };
+        hiddenPinClearBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          if (!clearArmed) {
+            clearArmed = true;
+            hiddenPinClearBtn.textContent = 'Confirm?';
+            hiddenPinClearBtn.classList.add('pe-confirm');
+            clearTimeout(clearTimer);
+            clearTimer = setTimeout(disarmClear, 4000);
+            return;
+          }
+          clearHiddenPinIds();
+          hiddenPinTextarea.value = '';
+          refreshContentFilter();
+          disarmClear();
+        });
+      }
     }
 
     const logoInput = wrap.querySelector('#pe-custom-logo-input');
@@ -5604,9 +8000,6 @@
     applyDarkMode();
   }
 
-  let _peDarkMql = null;
-  let _peDarkObs = null;
-
   function isPinterestDarkTheme() {
     const html = document.documentElement;
     if (!html) return false;
@@ -5619,22 +8012,7 @@
   function applyDarkMode() {
     const wrap = document.getElementById('pe-settings-wrap');
     if (!wrap) return;
-    const mode = get('darkMode');
-    let dark = false;
-    if (mode === 'dark') dark = true;
-    else if (mode === 'auto') dark = isPinterestDarkTheme();
-    wrap.classList.toggle('pe-dark', dark);
-
-    if (!_peDarkMql) {
-      try {
-        _peDarkMql = window.matchMedia('(prefers-color-scheme: dark)');
-        _peDarkMql.addEventListener('change', () => { if (get('darkMode') === 'auto') applyDarkMode(); });
-      } catch (_) {}
-    }
-    if (!_peDarkObs) {
-      _peDarkObs = new MutationObserver(() => { if (get('darkMode') === 'auto') applyDarkMode(); });
-      _peDarkObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-color-scheme', 'data-theme', 'class'] });
-    }
+    wrap.classList.add('pe-dark');
   }
 
 
@@ -5667,13 +8045,15 @@
       let card = target.closest ? target.closest('[data-test-id="pin"], [data-grid-item="true"], [data-test-id="pin-closeup-image"], .PinCard') : null;
       let wrap = target.closest ? target.closest('[data-test-id="pinWrapper"], [data-test-id="pin-closeup-image"]') : null;
       let title = extractPinTitleFromScope(card || wrap);
+      const pinScope = card || wrap;
+      const pinId = pinScope ? getPinIdFromCard(pinScope) : currentPinIdFromLocation();
 
       if (wrap) {
         // Video
         const vid = wrap.querySelector('video');
         if (vid) {
           const src = vid.src || (vid.querySelector('source') && vid.querySelector('source').src);
-          if (src && !/i\.pinimg\.com/.test(src)) return { url: getHighestQualityVideoUrl(src), type: 'video', title };
+          if (src && !/i\.pinimg\.com/.test(src)) return { url: getHighestQualityVideoUrl(src), type: 'video', title, pinId };
         }
       }
 
@@ -5701,18 +8081,18 @@
       // Now determine if it's a GIF or Image
       // 1. Is it actively playing a GIF? (hover/auto-play swaps src)
       if (/\.gif(\?|$)/i.test(img.src)) {
-        return { url: img.src, type: 'gif', title };
+        return { url: img.src, type: 'gif', title, pinId };
       }
       
       // 2. Does it have a GIF in its original srcset?
       const origSrcset = img.__peAutoOrigSrcset || img.getAttribute('srcset') || '';
       for (const part of origSrcset.split(',')) {
         const url = part.trim().split(/\s+/)[0];
-        if (url && /\.gif(\?|$)/i.test(url)) return { url: url, type: 'gif', title };
+        if (url && /\.gif(\?|$)/i.test(url)) return { url: url, type: 'gif', title, pinId };
       }
 
       // Otherwise, it's a standard image. Return original quality URL.
-      return { url: getBestUrl(img), type: 'image', title };
+      return { url: getBestUrl(img), type: 'image', title, pinId };
     }
 
     // Return the best original-quality URL for an img element.
@@ -5836,6 +8216,21 @@
         'Save Original Media',
         () => downloadSingle(origUrl, title)
       );
+
+      // ── Hide / unhide pin ───────────────────────────────────────────
+      if (media.pinId) {
+        const hidden = isPinIdHidden(media.pinId);
+        addItem(
+          '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/><line x1="4.22" y1="4.22" x2="19.78" y2="19.78"/>',
+          hidden ? 'Unhide this pin' : 'Hide this pin',
+          () => {
+            if (hidden) unhidePinId(media.pinId);
+            else hidePinId(media.pinId);
+            if (!get('hideByPinIdEnabled')) set('hideByPinIdEnabled', true);
+            refreshContentFilter();
+          }
+        );
+      }
 
       _ctxMenu = menu;
       document.body.appendChild(menu);
@@ -6363,6 +8758,7 @@
         box-shadow: 0 4px 28px rgba(0,0,0,.16), 0 1px 4px rgba(0,0,0,.08);
         border: 1px solid var(--pe-border);
         min-width: 230px;
+        max-width: 260px;
         max-height: min(70dvh, 520px);
         contain: layout style paint;
         overflow-y: auto;
@@ -6453,6 +8849,8 @@
       .pe-inline-chevron:hover { background: var(--pe-row-hover); }
       .pe-inline-chevron .pe-chevron { display: block; }
       .pe-inline-chevron-open .pe-chevron { transform: rotate(180deg); }
+      /* Rows whose whole surface toggles an inline sub-panel. */
+      .pe-row-clickable { cursor: pointer; }
       /* Statistics counters */
       .pe-stat-value {
         font-weight: 700; font-size: 12px; color: var(--pe-accent);
@@ -6466,38 +8864,27 @@
         padding: 3px 10px; font-size: 11px; font-weight: 600;
         transition: background .12s;
       }
+      .pe-stats-reset-btn.pe-confirm {
+        background: var(--pe-accent); color: #fff; border-color: var(--pe-accent);
+      }
       .pe-stats-reset-btn:hover { background: var(--pe-row-hover); }
-      #pe-group-hide-body {
-        max-height: min(42dvh, 320px);
-        overflow-y: auto;
-        overflow-x: hidden;
-        overscroll-behavior: contain;
-        -webkit-overflow-scrolling: touch;
+      .pe-stats-reset-btn.pe-confirm:hover { background: var(--pe-accent-hover); }
+      /* Color picker swatch + inline button rows (theme color / save theme). */
+      .pe-color-field { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+      .pe-color-swatch {
+        width: 28px; height: 24px; padding: 0; flex-shrink: 0; cursor: pointer;
+        border: 1px solid var(--pe-border); border-radius: 6px; background: none;
       }
-      #pe-group-declutter-body {
-        max-height: min(32dvh, 220px);
-        overflow-y: auto;
-        overflow-x: hidden;
-        overscroll-behavior: contain;
-        -webkit-overflow-scrolling: touch;
-      }
-      #pe-group-translate-body {
-        max-height: min(42dvh, 320px);
-        overflow-y: auto;
-        overflow-x: hidden;
-        overscroll-behavior: contain;
-        -webkit-overflow-scrolling: touch;
-      }
-      #pe-group-customize-body {
-        max-height: min(36dvh, 260px);
-        overflow-y: auto;
-        overflow-x: hidden;
-        overscroll-behavior: contain;
-        -webkit-overflow-scrolling: touch;
-      }
+      /* Group bodies flow inside the single #pe-settings-panel scroller (no nested
+         scroll containers — those broke scroll-chaining when expanded). */
       .pe-group-body { border-top: 1px solid var(--pe-border); }
       .pe-sub-row { padding-left: 28px !important; background: var(--pe-surface); }
       .pe-sub-row:hover { background: var(--pe-row-hover) !important; }
+      /* Hide UI Elements sub-menus nest cleanly under their chevron rows. */
+      #pe-hide-nav-actions-suboptions > .pe-row,
+      #pe-hide-comments-suboptions > .pe-row {
+        border-top: none;
+      }
       .pe-select-row { align-items: center; }
       .pe-input-row { align-items: center; }
       .pe-setting-select {
@@ -6516,6 +8903,14 @@
         border-color: var(--pe-accent);
         box-shadow: 0 0 0 2px rgba(230,0,35,.16);
       }
+      .pe-theme-preview {
+        width: 22px; height: 22px;
+        border-radius: 5px;
+        border: 1px solid rgba(128,128,128,.35);
+        background: transparent;
+        flex-shrink: 0;
+        margin-left: 2px;
+      }
       .pe-setting-input {
         width: 128px;
         border: 1px solid var(--pe-input-border);
@@ -6532,6 +8927,13 @@
       }
       .pe-setting-number {
         width: 64px;
+      }
+      .pe-hidepinid-textarea {
+        width: 100%;
+        resize: vertical;
+        min-height: 64px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        line-height: 1.35;
       }
 
       /* Reload notice */
@@ -6636,6 +9038,42 @@
         width: 26px;
         height: 26px;
       }
+
+      /* Generic action-bar classes — used so injected buttons do not depend on
+         Pinterest's obfuscated class names like .oRZ5_s, .ADXRXN, .euRXRl. */
+      .pe-closeup-action-slot {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: auto;
+        flex: 0 0 auto;
+      }
+      .pe-closeup-action-button {
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        border: none;
+        background: transparent;
+        color: currentColor;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        touch-action: manipulation;
+      }
+      .pe-closeup-action-button:hover { background: rgba(0,0,0,.06); }
+      .pe-closeup-action-button:active { transform: scale(.94); }
+      .pe-closeup-action-button:disabled { opacity: .55; cursor: wait; transform: none !important; }
+      .pe-closeup-action-button svg { width: 26px; height: 26px; }
+      [data-test-id="closeup-pin-action-items"] .pe-closeup-action-slot {
+        min-width: 40px;
+      }
+      [data-test-id="closeup-pin-action-items"] .pe-closeup-action-button {
+        width: 40px;
+        height: 40px;
+      }
+
       #pe-reverse-image-search-menu {
         position: fixed;
         z-index: 2147483647;
@@ -6661,6 +9099,39 @@
         text-align: left;
       }
       #pe-reverse-image-search-menu button:hover { background: #f3f3f3; }
+      .pe-native-menu-item {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        margin: 0;
+        padding: 8px 16px;
+        border: none;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        font-size: 14px;
+        line-height: 20px;
+        text-align: left;
+        cursor: pointer;
+        box-sizing: border-box;
+      }
+      .pe-native-menu-item:hover,
+      .pe-native-menu-item:focus {
+        background: rgba(0,0,0,.06);
+        outline: none;
+      }
+      .pe-native-menu-item-inner {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        width: 100%;
+        pointer-events: none;
+      }
+      .pe-native-menu-item-inner svg {
+        flex-shrink: 0;
+        width: 16px;
+        height: 16px;
+      }
       #pe-toast {
         position: fixed;
         z-index: 2147483647;
@@ -6808,6 +9279,34 @@
       .pe-custom-logo-img.pe-custom-logo-circle {
         border-radius: 50%;
         object-fit: cover;
+      }
+
+      .pe-custom-nav-img {
+        width: var(--pe-custom-nav-size, 32px);
+        height: var(--pe-custom-nav-size, 32px);
+        object-fit: contain;
+        display: block;
+        pointer-events: none;
+      }
+      .pe-custom-nav-img.pe-custom-nav-circle {
+        border-radius: 50%;
+        object-fit: cover;
+      }
+
+      /* Subsection heading rows inside the Customize group */
+      .pe-subhead-row .pe-name { font-weight: 600; }
+      .pe-beta-badge {
+        display: inline-block;
+        margin-left: 4px;
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: var(--pe-accent);
+        color: #fff;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        vertical-align: middle;
       }
 
       .pe-translated-text {
@@ -7023,7 +9522,7 @@
     try {
       fn();
     } catch (err) {
-      console.warn('[Pinterest Power Menu] Feature startup failed:', name, err);
+      debugLog('warn', 'Feature startup failed:', name, err);
     }
   }
 
@@ -7090,9 +9589,14 @@
     safeInit('closeupDownload', initCloseupImageDownloadButton);
     safeInit('reverseImageSearchButton', initReverseImageSearchButton);
     safeInit('pinCardQuickDownload', initDesktopPinCardQuickDownloadButton);
+    safeInit('nativeMenuHideItem', initNativeMenuHideItem);
 
     // Custom nav logo
     if (!IS_MOBILE) safeInit('customPinterestLogo', initCustomPinterestLogo);
+
+    // Per-button custom images (desktop only) and custom background theme
+    if (!IS_MOBILE) safeInit('customNavImages', initCustomNavImages);
+    safeInit('customTheme', () => { migrateThemeSettings(); applyCustomTheme(); });
 
     // Hide shop posts
     safeInit('hideShopPosts', initHideShopPosts);
@@ -7102,6 +9606,9 @@
 
     // Hide comments
     safeInit('hideComments', initHideComments);
+
+    // Comment keyword blocker
+    safeInit('commentBlocker', refreshCommentBlocker);
 
     // Visible text translation
     safeInit('autoTranslate', initAutoTranslate);
@@ -7114,6 +9621,21 @@
     safeInit('mobileLazyFix', initMobileLazyFix);
 
     setTimeout(() => safeInit('settingsPanelRetry', ensureSettingsPanel), 1000);
+
+    // Ensure pending statistics are persisted before the page unloads.
+    safeInit('statsFlushListeners', () => {
+      window.addEventListener('pagehide', flushPendingStats);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flushPendingStats();
+      });
+    });
+
+    // Development aid: warn if brittle selectors no longer match Pinterest markup.
+    // Skipped on mobile to avoid a slow querySelectorAll pass on every load.
+    safeInit('selectorHealthCheck', () => {
+      if (IS_MOBILE) return;
+      setTimeout(checkSelectorHealth, 5000);
+    });
   }
 
   if (document.readyState === 'loading')
@@ -7130,6 +9652,48 @@
   (function () {
     let _lastPath = location.pathname;
 
+    function reinitPageModules() {
+      // CSS classes on body/html
+      applyVisitSiteToggle();
+      applyNavToggles();
+      initMessagesRemover();
+      initVisitSiteHider();
+
+      // Observer-driven modules
+      initDeclutter();
+      initRemoveVideos();
+      if (get('gifAutoPlay')) initGifAutoPlay();
+      if (get('videoAutoPlay')) initVideoAutoPlay();
+      if (get('infiniteLoopVideo')) initInfiniteLoopVideo();
+      applyInfiniteLoopVideoToggle();
+      initHideShopPosts();
+      initContentFilter();
+      initHideComments();
+      refreshCommentBlocker();
+      initAutoTranslate();
+      initManualTranslateButtons();
+      initDesktopPinCardQuickDownloadButton();
+      initNativeMenuHideItem();
+      if (!IS_MOBILE) initCustomPinterestLogo();
+      if (!IS_MOBILE) initCustomNavImages();
+      applyCustomTheme();
+
+      // UI elements that are recreated per page
+      removeBoardDownloaderUI();
+      if (get('boardDownloader') && isBoardPage()) createBoardDownloaderUI();
+      removeCloseupImageDownloadButton();
+      removeReverseImageSearchButton();
+      if (IS_MOBILE) {
+        scheduleMobileCloseupActionButtonsRefresh();
+      } else if (supportsCloseupActionBarEnhancements()) {
+        createCloseupImageDownloadButton();
+        if (get('reverseImageSearchButton')) createReverseImageSearchButton();
+      }
+
+      if (hasAnyAutoTranslateEnabled()) scanAutoTranslateCandidates(document);
+      if (get('showManualTranslateButtons')) scanManualTranslateCandidates(document);
+    }
+
     function onNavigate() {
       const newPath = location.pathname;
       if (newPath === _lastPath) return;
@@ -7140,20 +9704,14 @@
       _interceptedVideoUrls.length = 0;
       _interceptedVideoUrlsByHash.clear();
 
+      // Disconnect per-route observers before React tears down the old page.
+      // Persistent observers (original quality, shared bus, SPA watcher) stay alive.
+      disconnectAllOnNavigation();
+
       // Give Pinterest's React a moment to render the new page
       setTimeout(() => {
-        removeBoardDownloaderUI();
-        if (get('boardDownloader') && isBoardPage()) createBoardDownloaderUI();
-        removeCloseupImageDownloadButton();
-        removeReverseImageSearchButton();
-        if (IS_MOBILE) {
-          scheduleMobileCloseupActionButtonsRefresh();
-        } else if (supportsCloseupActionBarEnhancements()) {
-          createCloseupImageDownloadButton();
-          if (get('reverseImageSearchButton')) createReverseImageSearchButton();
-        }
-        if (hasAnyAutoTranslateEnabled()) scanAutoTranslateCandidates(document);
-        if (get('showManualTranslateButtons')) scanManualTranslateCandidates(document);
+        protectCurrentCloseupPinId();
+        reinitPageModules();
       }, 600);
 
       // Further attempts with increasing delays — mobile video src can arrive late
@@ -7182,7 +9740,7 @@
 
     // Also watch for the board header / video element appearing in the DOM (handles cases
     // where the URL change fires before React has rendered the new page content)
-    new MutationObserver(records => {
+    const _spaWatcher = new MutationObserver(records => {
       if (hasOnlyPowerMenuMutations(records)) return;
       if (!document.getElementById('pe-bd-btn') && get('boardDownloader') && isBoardPage())
         createBoardDownloaderUI();
@@ -7196,7 +9754,9 @@
       }
       if (hasAnyAutoTranslateEnabled() && _autoTranslateRescan) _autoTranslateRescan();
       if (get('showManualTranslateButtons') && _manualTranslateRescan) _manualTranslateRescan();
-    }).observe(document.documentElement, { childList: true, subtree: true });
+    });
+    _spaWatcher.observe(document.documentElement, { childList: true, subtree: true });
+    registerObserver('spaWatcher', _spaWatcher, { target: document.documentElement, persistent: true });
   })();
 
 })();

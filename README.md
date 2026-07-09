@@ -6,7 +6,7 @@
 
 **An all-in-one userscript that makes Pinterest actually good.**
 
-[![Version](https://img.shields.io/badge/Version-v1.5.0-red?style=flat-square)](https://github.com/Angel2mp3)
+[![Version](https://img.shields.io/badge/Version-v1.8.0-red?style=flat-square)](https://github.com/Angel2mp3)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![Installs](https://img.shields.io/endpoint?url=https%3A%2F%2Fuserscript-install-tracker.vercel.app%2Fapi%2Fbadge%3Frepo%3DPinterestPowerMenu&style=flat-square)](https://github.com/Angel2mp3/Pinterest-Power-Menu)
 [![FMHY](https://img.shields.io/badge/Featured%20on-FMHY-purple?style=flat-square)](https://fmhy.net/social-media-tools#social-media-tools)
@@ -53,9 +53,16 @@ Most features work on the mobile Pinterest website too. A few are desktop-only, 
 - Declutter tools for sponsored, shopping, product, support, and suggestion modules
 - **Hide AI Content** — filter AI-generated pins with Conservative / Balanced / Aggressive detection tiers and custom keywords
 - **Hide by Keywords** — block pins whose title or auto-label matches a word list you define
+- **Hide Comments by Keywords** — collapse individual comments that contain phrases you define, before you read them
+- **Hide by Pin ID** — hide specific pins by their numeric Pinterest IDs
+- **Hide Already-Seen Pins** — automatically hide pins you have already opened
 - Custom Pinterest logo replacement on desktop
+- Per-button custom nav images on desktop
+- Custom solid background theme (Beta)
 - Hide controls for action buttons, comments, reactions, share sheets, search suggestions, composer tools, and proactive outreach popups
 - **Statistics** — optional all-time counters for ads blocked, AI content blocked, images/videos downloaded, and comments translated
+- **Backup & Restore** — export/import settings, hidden pin IDs, and board download history
+- **Convert WebP to PNG** — optional re-encoding of WebP downloads as PNG
 - Lightweight update notice with a permanent opt-out
 
 ---
@@ -72,9 +79,20 @@ Pinterest's built-in downloads can save compressed or badly named files. Downloa
 
 ### 🗂️ Board Downloader
 
-Board Downloader adds a download action to board pages. It scrolls the current board, finds pins, skips the "More Ideas" section, and downloads original-quality images when available.
+Board Downloader adds a download action to board pages. It scrolls the current board, finds pins, skips the "More Ideas" section, and downloads original-quality images when available. If an original is unavailable, it automatically falls back to the next-best size so you still get the largest version Pinterest allows.
 
 Filenames use the pin title when Pinterest exposes one, with a `Pin - 12345678` style fallback when it does not.
+
+The board download menu gives two choices:
+
+- **Download All** — save each pin as a separate file.
+- **Download All as ZIP** — collect all pins into a single `.zip` archive named after the board and download that one file.
+
+If you enable **Track Downloaded Pins**, you also get **Download New** and **Download New as ZIP** to fetch only pins that were not saved before.
+
+### 🔄 Convert WebP to PNG
+
+Enable **Convert WebP to PNG** to re-encode WebP image downloads as PNG before saving. This is useful for tools or workflows that prefer PNG files, or when Pinterest serves the original image as WebP.
 
 ### ⬇️ Quick Download Button
 
@@ -177,6 +195,30 @@ This filter runs on the same observer as Hide AI Content, so both can be active 
 
 ---
 
+## 💬 Hide Comments by Keywords
+
+Hide Comments by Keywords collapses individual comments that contain phrases you define. Enter a comma-separated list of phrases; the script checks both the original comment text and any auto-translated text, and hides the comment before it can be read.
+
+Use specific phrases rather than broad single words to avoid false positives. The filter only hides comments — it does not hide the pin itself or the whole comment section.
+
+---
+
+## 🎯 Hide by Pin ID
+
+Hide by Pin ID lets you hide specific pins by entering their numeric Pinterest IDs. Add one or more comma-separated pin IDs in the text area; any matching pin is removed from feeds and search results.
+
+Open a pin's native "More options" (⋯) menu and choose **Hide pin** / **Unhide pin** to populate the list automatically, or enter IDs manually.
+
+---
+
+## 👁️ Hide Seen Pins
+
+Hide Seen Pins automatically removes pins you have already opened from feeds and search. Once a pin closeup has been viewed, that pin ID is remembered and hidden wherever it appears again.
+
+This works independently of Hide by Pin ID and the other content filters.
+
+---
+
 ## 🧹 Declutter
 
 The Declutter group is enabled by default. It removes or collapses noisy Pinterest modules without leaving huge empty gaps where possible.
@@ -202,7 +244,7 @@ Declutter options:
 
 | Toggle | Default | What it does |
 |---|---:|---|
-| Hide Shop The Look Modules | On | Collapses Shop the Look shopping modules and product carousels |
+| Hide Shop The Look Modules | Off | Collapses Shop the Look shopping modules and product carousels |
 | Hide Search Support Advisory | Off | Collapses Pinterest's search support advisory cards when Declutter is also on |
 | Hide Shop Posts | Off | Collapses pins linked to known shop domains such as Amazon, Etsy, eBay, TeePublic, Redbubble, and AliExpress when Declutter is also on |
 
@@ -212,7 +254,9 @@ New settings are saved the first time they appear. After that, your choices stay
 
 ## 🙈 Hide UI Elements
 
-The Hide UI Elements group lets you remove smaller Pinterest controls independently.
+The Hide UI Elements group lets you remove smaller Pinterest controls independently. It is split into two compact sub-menus so the list stays manageable:
+
+### Navigation & Actions
 
 | Toggle | What it hides |
 |---|---|
@@ -222,12 +266,17 @@ The Hide UI Elements group lets you remove smaller Pinterest controls independen
 | Hide Share Button | Closeup Share/Send buttons, mobile share sheet contents, provider buttons, and copy-link share controls |
 | Hide React Button | The full React heart slot in closeup action rows |
 | Hide Reaction Count | Only the numeric reaction count |
-| Hide Upload Image Button | The Lens upload image button in Pinterest search |
+| Hide Upload Image Button | The Lens upload image button in Pinterest search (desktop only) |
 | Hide Search Image Button | The Search image visual-search overlay button |
 | Hide Search Suggestions | One-bar related search suggestion chips and mobile "Ideas you might love" suggestion cards |
 | Hide View Larger Button | The View larger/media viewer overlay button |
 | Hide More Options Button | Closeup More actions/ellipsis buttons |
 | Hide Reverse Image Search Button | The custom Reverse Image Search button |
+
+### Comments & More
+
+| Toggle | What it hides |
+|---|---|
 | Hide Comment Button | Only the Comments button in closeup action rows |
 | Hide Comment Section | Comment sections and comment input areas |
 | Hide Comment Emoji Button | The emoji picker in the comment composer |
@@ -239,9 +288,13 @@ The hide rules target known Pinterest areas so they do not wipe out unrelated mo
 
 ---
 
-## 🎨 Custom Pinterest Logo
+## 🎨 Customize
 
-On desktop, the Customize group can replace Pinterest's home logo with your own image URL.
+The Customize group contains desktop-only appearance tweaks and an experimental background theme.
+
+### Custom Pinterest Logo (desktop only)
+
+Replace Pinterest's home logo with your own image URL.
 
 Controls:
 
@@ -251,7 +304,13 @@ Controls:
 
 By default, custom logos render as a circular `32px` image with `object-fit: cover`, which keeps square images closer to Pinterest's normal round logo button. Non-circle mode uses contained square rendering.
 
-This option is hidden on mobile because the logo replacement is desktop-only.
+### Button Images (desktop only)
+
+Replace each main navigation button with your own image. This is hidden on mobile because it can be laggy or unreliable on touch devices.
+
+### Background Theme (Beta)
+
+Apply a custom solid background color behind Pinterest's content. The theme is **off by default** so Pinterest keeps its native look until you enable it. Choose from a few built-in color presets or enter your own hex color code. This feature is experimental and is marked Beta while it is refined.
 
 ---
 
@@ -273,20 +332,40 @@ Totals are cumulative across sessions and saved like your other settings. A **Re
 
 ---
 
+## 💾 Backup & Restore
+
+The Backup & Restore group lets you save and restore your Pinterest Power Menu data. This is useful when your userscript engine or browser does not persist storage across updates, or when moving settings to another device.
+
+A backup includes:
+
+- All settings
+- Hidden pin IDs
+- Board download history
+
+Choose **Export** to download a JSON backup file, **Import** to load a backup file (hold Shift while clicking Import to merge instead of replace), or **Copy** to copy the backup JSON to your clipboard.
+
+---
+
 ## ⚙️ Settings Panel
 
 Click the gear button in the bottom-right corner of Pinterest to open Pinterest Power Menu settings.
 
 Settings are grouped into:
 
-- Main feature toggles
+- Essentials
+- Media Playback
+- Downloads
+- Content Filtering
+- Tools
 - Declutter Options
 - Translate
 - Customize
 - Hide UI Elements
 - Statistics
+- Debugging
+- Backup & Restore
 
-There's also a Dark Mode dropdown (Auto / Light / Dark) that controls the appearance of the settings panel and the floating gear button.
+The settings panel and floating gear button always use a dark appearance.
 
 Most settings apply immediately without a page reload. Settings are saved through your userscript manager with `GM_setValue` / `GM_getValue`.
 
@@ -331,17 +410,22 @@ Reverse image search and download buttons appear on supported pins, closeups, an
 
 ## 🧪 Testing
 
-Run the local smoke test with Node.js:
+Run the local smoke test with npm:
 
 ```bash
-node tests/userscript-feature-smoke.test.js
+npm test
 ```
 
 Optional syntax checks:
 
 ```bash
-node --check PinterestPowerMenu.user.js
-node --check tests/userscript-feature-smoke.test.js
+npm run check
+```
+
+You can also run the nav-selector verification directly:
+
+```bash
+npm run test:selectors
 ```
 
 ---
@@ -353,6 +437,7 @@ node --check tests/userscript-feature-smoke.test.js
 - If downloads or reverse image search do not work, check whether another extension or ad blocker is blocking Pinterest media URLs.
 - If the layout looks wrong after a Pinterest update, disable declutter or hide-UI options one at a time to find the changed selector.
 - If an old version keeps loading, force-update the script from your userscript manager dashboard.
+- Enable **Debug Logging** in settings and check the browser console for diagnostic messages when a feature is not working as expected.
 
 ---
 

@@ -3820,6 +3820,71 @@
     return null;
   }
 
+  // Pinterest has no /originals/ file for every pin, and the CDN answers a
+  // missing key with a 403 XML body — so a blind rewrite can return a dead
+  // link. These helpers tie the context menu and reverse image search to URLs
+  // that actually load. Module scope so both modules can share the cache.
+
+  // pin path (extension/size independent) -> verified URL, '' = nothing worked
+  const _bestUrlCache = new Map();
+  // pin path -> in-flight resolution, so rapid clicks share one probe run
+  const _bestUrlPending = new Map();
+
+  // URL this <img> has demonstrably loaded (browser already fetched it).
+  function loadedPinimgUrl(img) {
+    if (!img || img.tagName !== 'IMG' || !img.complete || !(img.naturalWidth > 0)) return '';
+    const cur = img.currentSrc || img.src || '';
+    return /^https?:\/\/i\.pinimg\.com\/(?:originals|\d+x)\//i.test(cur) ? cur : '';
+  }
+
+  function pinimgPinKey(url) {
+    const m = String(url).match(
+      /i\.pinimg\.com\/(?:originals|\d+x)(\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{32})\.[a-z]+/i
+    );
+    return m ? m[1].toLowerCase() : url;
+  }
+
+  // Throwaway <img> load: no CORS, no GM request, and hits the browser cache
+  // for variants (like the displayed 736x) the page already fetched.
+  function probeImageUrl(url) {
+    return new Promise(resolve => {
+      const probe = new Image();
+      let settled = false;
+      const finish = ok => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        probe.onload = probe.onerror = null;
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), 8000);
+      probe.onload = () => finish(probe.naturalWidth > 0);
+      probe.onerror = () => finish(false);
+      probe.src = url;
+    });
+  }
+
+  // Walk the same ladder the download path uses (originals jpg -> png -> webp,
+  // then 736x, then 564x) and return the first URL that really loads.
+  async function resolveBestUrl(url) {
+    if (!url || !/i\.pinimg\.com/i.test(url)) return url;
+    const candidates = pinimgFallbackQueue(url);
+    if (candidates.length < 2) return url;          // video / non-pinimg: leave alone
+    const key = pinimgPinKey(url);
+    if (_bestUrlCache.has(key)) return _bestUrlCache.get(key) || url;
+    if (_bestUrlPending.has(key)) return _bestUrlPending.get(key);
+    const job = (async () => {
+      let hit = '';
+      for (const candidate of candidates) {
+        if (await probeImageUrl(candidate)) { hit = candidate; break; }
+      }
+      _bestUrlCache.set(key, hit);
+      return hit || url;
+    })().finally(() => _bestUrlPending.delete(key));
+    _bestUrlPending.set(key, job);
+    return job;
+  }
+
   function buildImageDownloadName(buf, filename, finalExt) {
     const ext = finalExt || detectFileType(new Uint8Array(buf));
     const explicitTitle = stripKnownExt(sanitizeFilename(filename || ''));
@@ -5058,13 +5123,16 @@
 
   async function openReverseImageSearchProvider(providerId, imageUrl) {
     const provider = getReverseImageSearchProvider(providerId);
+    // Providers fetch (or copy) this URL themselves, so hand them one that
+    // really loads instead of a blind /originals/ rewrite the CDN may 403 on.
+    const verifiedUrl = await resolveBestUrl(imageUrl);
     if (provider.mode === 'copy-open') {
       window.open(provider.homeUrl, '_blank', 'noopener');
-      await copyTextToClipboard(imageUrl);
+      await copyTextToClipboard(verifiedUrl);
       showPowerMenuToast(provider.copiedMessage || 'Image URL copied.');
       return;
     }
-    window.open(provider.build(imageUrl), '_blank', 'noopener');
+    window.open(provider.build(verifiedUrl), '_blank', 'noopener');
   }
 
   function removeReverseImageSearchMenu() {
@@ -5241,6 +5309,9 @@
   function showReverseImageSearchMenu(anchor, imageUrl) {
     removeReverseImageSearchMenu();
     if (!imageUrl) return;
+    // Warm the verified URL while the user picks a provider, so the click is
+    // usually served from cache and opens inside the user-gesture window.
+    resolveBestUrl(imageUrl).catch(() => {});
     const menu = document.createElement('div');
     menu.id = 'pe-reverse-image-search-menu';
     menu.setAttribute('data-pe-ui', 'true');
@@ -8095,9 +8166,18 @@
       return { url: getBestUrl(img), type: 'image', title, pinId };
     }
 
-    // Return the best original-quality URL for an img element.
+    // The verified-URL resolver (loadedPinimgUrl / pinimgPinKey /
+    // probeImageUrl / resolveBestUrl) lives at module scope so reverse image
+    // search shares the same cache.
+
+    // Synchronous starting point for the menu.
     function getBestUrl(img) {
-      const base = img.__peAutoOrigSrc || img.src;
+      const loaded = loadedPinimgUrl(img);
+      if (/\/originals\//i.test(loaded)) {
+        _bestUrlCache.set(pinimgPinKey(loaded), loaded);
+        return loaded;
+      }
+      const base = (img && (img.__peAutoOrigSrc || img.src)) || '';
       const m = base.match(OQ_RE);
       return m ? m[1] + '/originals' + m[2] : base;
     }
@@ -8168,6 +8248,9 @@
     function showCtxMenuAt(x, y, media, isTouch) {
       removeCtxMenu();
       const { url: origUrl, type, title } = media;
+      // Resolve while the user reads the menu so the clicks below don't stall
+      // (also keeps window.open inside the user-gesture window).
+      if (type === 'image') resolveBestUrl(origUrl).catch(() => {});
       const menuX = Math.min(x, window.innerWidth  - 236);
       const menuY = Math.min(y, window.innerHeight - 200);
 
@@ -8191,7 +8274,7 @@
         'Copy Original Media',
         async () => {
           try {
-            await copyMediaToClipboard(origUrl, type);
+            await copyMediaToClipboard(await resolveBestUrl(origUrl), type);
           } catch (_) {}
         }
       );
@@ -8200,14 +8283,14 @@
       addItem(
         '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
         'Copy Media URL',
-        () => { copyTextToClipboard(origUrl); }
+        () => { resolveBestUrl(origUrl).then(copyTextToClipboard); }
       );
 
       // ── Open in new tab ─────────────────────────────────────────────
       addItem(
         '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
         'Open Media in New Tab',
-        () => window.open(origUrl, '_blank', 'noopener')
+        () => { resolveBestUrl(origUrl).then(u => window.open(u, '_blank', 'noopener')); }
       );
 
       // ── Save / download ─────────────────────────────────────────────
